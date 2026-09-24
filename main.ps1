@@ -666,126 +666,182 @@ function Get-WifiNetworks {
     try {
         Write-Log "Scanning for networks..." "INFO" $LogFile $DebugFile
         
-        $networks = [System.Collections.ArrayList]::new()
+        # Utilisation d'une liste générique pour de meilleures performances
+        $networks = [System.Collections.Generic.List[hashtable]]::new()
         
         if ($script:CONFIG.IsWindows) {
-            # Forcer un scan frais
-            Write-Log "Triggering WiFi scan..." "DEBUG" $LogFile $DebugFile
+            Write-Host "`nScanning WiFi networks... Please wait..." -ForegroundColor Yellow
             
-            # Désactiver/réactiver l'interface WiFi pour forcer un nouveau scan
-            # netsh wlan disconnect interface="$($script:CONFIG.Interface)" 2>$null | Out-Null
+            # ============================================
+            # CORRECTION 1 : Boucle de scan avec retry
+            # ============================================
+            $scanAttempts = 0
+            $maxAttempts = 5
+            $rawOutput = ""
             
-            # Multiple tentatives de scan
-            for ($attempt = 1; $attempt -le 3; $attempt++) {
-                Write-Log "Scan attempt $attempt..." "DEBUG" $LogFile $DebugFile
+            while ($scanAttempts -lt $maxAttempts) {
+                # Forcer un scan frais
+                $null = netsh wlan scan interface="$($script:CONFIG.Interface)" 2>&1
+                Start-Sleep -Seconds 3
                 
-                # Forcer le scan avec l'interface spécifiée
-                $scanResult = netsh wlan scan interface="$($script:CONFIG.Interface)" 2>&1
-                Write-Log "Scan result: $scanResult" "DEBUG" $LogFile $DebugFile
-                
-                Start-Sleep -Seconds 2
-                
-                # Récupérer les réseaux avec l'interface spécifiée
                 $rawOutput = netsh wlan show networks interface="$($script:CONFIG.Interface)" mode=Bssid 2>&1
                 
-                if ($rawOutput -match "There are currently no networks|Aucun réseau") {
-                    Write-Log "No networks found on attempt $attempt, retrying..." "WARNING" $LogFile $DebugFile
-                    Start-Sleep -Seconds 3
-                    continue
+                # Vérifier si on a au moins un SSID
+                if ($rawOutput -match "SSID\s+\d+\s*:") {
+                    Write-Log "Scan successful on attempt $($scanAttempts + 1)" "DEBUG" $LogFile $DebugFile
+                    break
                 }
                 
-                break
+                $scanAttempts++
+                Write-Log "Scan attempt $scanAttempts returned no results, retrying..." "WARNING" $LogFile $DebugFile
+                Write-Host "  Scan attempt $scanAttempts failed, retrying..." -ForegroundColor Gray
             }
             
-            Write-Log "Raw output: $rawOutput" "DEBUG" $LogFile $DebugFile
+            if ($scanAttempts -ge $maxAttempts) {
+                Write-Log "All scan attempts failed. No networks found." "WARNING" $LogFile $DebugFile
+                return $null
+            }
+            
+            Write-Log "Raw netsh output captured" "DEBUG" $LogFile $DebugFile
             
             $currentNetwork = $null
+            $lineNumber = 0
+            
             foreach ($line in $rawOutput) {
-                # Ignorer les lignes d'erreur ou vides
-                if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith("Group Policy")) {
-                    continue
-                }
+                $lineNumber++
+                $trimmedLine = $line.Trim()
                 
-                if ($line -match "SSID\s+\d+\s*:\s*(.+)" -or $line -match "SSID\s*:\s*(.+)") {
-                    if ($currentNetwork) { 
-                        [void]$networks.Add($currentNetwork) 
+                # Ignorer les lignes vides ou d'en-tête
+                if ([string]::IsNullOrWhiteSpace($trimmedLine)) { continue }
+                
+                Write-Log "Processing line $lineNumber : $trimmedLine" "DEBUG" $LogFile $DebugFile
+                
+                # ============================================
+                # CORRECTION 2 : Regex SSID plus stricte
+                # ============================================
+                if ($trimmedLine -match "^SSID\s+\d+\s*:\s*(.+)$") {
+                    # Sauvegarder le réseau précédent
+                    if ($currentNetwork -and -not [string]::IsNullOrWhiteSpace($currentNetwork.SSID)) { 
+                        [void]$networks.Add($currentNetwork)
+                        Write-Log "Added network: $($currentNetwork.SSID) (Signal: $($currentNetwork.Signal)%, Security: $($currentNetwork.Security))" "DEBUG" $LogFile $DebugFile
                     }
+                    
+                    $ssidName = $matches[1].Trim()
+                    
+                    # Nettoyer le nom SSID (enlever les caractères de contrôle)
+                    $ssidName = $ssidName -replace '[\x00-\x1F\x7F]', ''
+                    
                     $currentNetwork = @{
-                        SSID = $matches[1].Trim()
+                        SSID = $ssidName
                         Security = "Unknown"
                         Signal = 0
                         BSSID = ""
+                        Authentication = ""
+                        Encryption = ""
+                        NetworkType = ""
                     }
+                    
+                    Write-Log "Found SSID: $ssidName" "DEBUG" $LogFile $DebugFile
                 }
                 elseif ($currentNetwork) {
-                    if ($line -match "Authentication\s+:\s+(.+)") {
+                    # Authentification
+                    if ($trimmedLine -match "Authentication\s*:\s*(.+)" -or 
+                        $trimmedLine -match "Authentification\s*:\s*(.+)") {
+                        $currentNetwork.Authentication = $matches[1].Trim()
                         $currentNetwork.Security = $matches[1].Trim()
                     }
-                    elseif ($line -match "Signal\s+:\s+(\d+)") {
+                    # Chiffrement
+                    elseif ($trimmedLine -match "Cipher\s*:\s*(.+)" -or 
+                            $trimmedLine -match "Chiffrement\s*:\s*(.+)") {
+                        $currentNetwork.Encryption = $matches[1].Trim()
+                    }
+                    # Signal
+                    elseif ($trimmedLine -match "Signal\s*:\s*(\d+)") {
                         $currentNetwork.Signal = [int]$matches[1].Trim()
                     }
-                    elseif ($line -match "BSSID\s+\d+\s*:\s*([0-9a-fA-F:]+)") {
+                    # Type de réseau
+                    elseif ($trimmedLine -match "Network type\s*:\s*(.+)" -or
+                            $trimmedLine -match "Type de réseau\s*:\s*(.+)") {
+                        $currentNetwork.NetworkType = $matches[1].Trim()
+                    }
+                    # BSSID (utile pour le debug)
+                    elseif ($trimmedLine -match "BSSID\s+\d+\s*:\s*([0-9a-fA-F:]+)") {
                         $currentNetwork.BSSID = $matches[1].Trim()
                     }
                 }
             }
             
-            if ($currentNetwork) { 
-                [void]$networks.Add($currentNetwork) 
+            # Ajouter le dernier réseau
+            if ($currentNetwork -and -not [string]::IsNullOrWhiteSpace($currentNetwork.SSID)) { 
+                [void]$networks.Add($currentNetwork)
+                Write-Log "Added final network: $($currentNetwork.SSID)" "DEBUG" $LogFile $DebugFile
             }
             
-            Write-Log "Found $($networks.Count) networks" "INFO" $LogFile $DebugFile
-            
         } else {
-            # Linux
+            # Linux - iw/iwlist
             $interface = $script:CONFIG.Interface
             if (-not $interface) { $interface = "wlan0" }
             
-            # Tenter avec iw
+            # ============================================
+            # CORRECTION 3 : Validation anti-injection
+            # ============================================
+            if ($interface -notmatch '^[a-zA-Z0-9_\-]+$') {
+                throw "Nom d'interface invalide détecté : '$interface'. Caractères autorisés : a-z, A-Z, 0-9, _, -"
+            }
+            
+            Write-Host "Scanning on Linux interface: $interface" -ForegroundColor Yellow
+            
             $scanOutput = sudo iw dev $interface scan 2>$null | Out-String
             
             if (-not $scanOutput) {
-                # Essayer iwlist
                 $scanOutput = sudo iwlist $interface scan 2>$null | Out-String
             }
             
             if ($scanOutput) {
-                $cells = $scanOutput -split "BSS|Cell"
+                $cells = $scanOutput -split "(?=(BSS|Cell) [0-9a-f]{2}:)"
                 foreach ($cell in $cells) {
                     if ($cell -match "SSID:\s*(.+)") {
                         $ssid = $matches[1].Trim()
                         
                         # Ignorer les SSID vides ou cachés
-                        if ([string]::IsNullOrWhiteSpace($ssid) -or $ssid -eq "\x00") {
+                        if ([string]::IsNullOrWhiteSpace($ssid) -or $ssid -eq "\x00" -or $ssid -eq "\x00\x00\x00") {
                             continue
                         }
                         
                         $signal = 0
                         if ($cell -match "signal:\s*(-?\d+(\.\d+)?)") {
                             $signalDbm = [decimal]$matches[1]
-                            # Convertir dBm en pourcentage approximatif
                             $signal = [Math]::Min(100, [Math]::Max(0, 2 * ($signalDbm + 100)))
                         }
                         
+                        $security = "Open"
+                        if ($cell -match "RSN") { $security = "WPA2" }
+                        elseif ($cell -match "WPA") { $security = "WPA" }
+                        
                         [void]$networks.Add(@{
                             SSID = $ssid
-                            Security = if ($cell -match "WPA3") { "WPA3" } elseif ($cell -match "WPA2") { "WPA2" } else { "WPA/WPA2" }
+                            Security = $security
                             Signal = [int]$signal
                             BSSID = ""
+                            Authentication = $security
+                            Encryption = ""
+                            NetworkType = "Infrastructure"
                         })
                     }
                 }
             }
         }
         
-        # Filtrer les réseaux avec signal trop faible ou SSID vide
-        $filteredNetworks = $networks | Where-Object { 
-            $_.Signal -ge 5 -and 
+        # ============================================
+        # CORRECTION 4 : Encapsulation dans @() pour garantir un tableau
+        # ============================================
+        $filteredNetworks = @($networks | Where-Object { 
             -not [string]::IsNullOrWhiteSpace($_.SSID) -and
-            $_.SSID -ne "\x00"
-        }
+            $_.SSID -ne "\x00" -and
+            $_.Signal -ge 1
+        } | Sort-Object -Property Signal -Descending)
         
-        Write-Log "Returning $($filteredNetworks.Count) networks after filtering" "INFO" $LogFile $DebugFile
+        Write-Log "Found $($filteredNetworks.Count) valid networks" "INFO" $LogFile $DebugFile
         
         return $filteredNetworks
         
