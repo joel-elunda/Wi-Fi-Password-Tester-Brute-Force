@@ -1,1 +1,111 @@
+# PowerShell
+*.ps1.log
+*.ps1.xml
+*.ps1.config
+
+# Tool Generated Files
+logs/
 *.log
+debug_*.log
+scan_*.log
+success_*.txt
+wrong_passwords.txt
+passwords_*.txt
+
+# Temporary Files
+*.tmp
+temp/
+tmp/
+~$*
+
+# Network Profiles (potentially sensitive)
+*.xml
+WLAN_*.xml
+TempProfile_*
+
+# OS Generated Files
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.nfs*
+.directory
+.Trash-*
+
+# IDE and Editors
+# VS Code
+.vscode/
+*.code-workspace
+
+# PowerShell ISE
+*.ps1.bak
+*.ps1~
+
+# IntelliJ/PHPStorm
+.idea/
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Node (if any web components)
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Python (if any helpers)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Compiled files
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Sensitive data (never commit)
+config.json
+secrets.ps1
+credentials.*
+*.key
+*.pem
+*.pfx
+
+# Test files
+test/
+tests/
+*.test.ps1
+
+# Large files
+*.iso
+*.img
+*.dmg

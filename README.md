@@ -5,45 +5,75 @@
   <img src="https://img.shields.io/badge/PowerShell-5.1+-purple.svg" alt="PowerShell">
   <img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-green.svg" alt="Platform">
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
-  <img src="https://img.shields.io/badge/Region-Africa%20Optimized-orange.svg" alt="Region">
 </p>
 
 <p align="center">
-  <b>Outil avancé de test de sécurité WiFi avec anonymisation MAC et détection d'environnement hostile</b><br>
-  <i>Optimisé pour les réseaux d'Afrique Centrale et de l'Ouest</i>
+  <b>Advanced WiFi Security Testing Tool with MAC Anonymization and ISP Pattern Analysis</b><br>
+  <i>Optimized for Orange and Vodacom Fiber Box Password Patterns</i>
 </p>
 
 ---
 
-## 📋 Table des matières
+## 📋 Table of Contents
 
 - [Description](#-description)
-- [Fonctionnalités](#-fonctionnalités)
-- [Prérequis](#-prérequis)
+- [Features](#-features)
+- [Prerequisites](#-prerequisites)
 - [Installation](#-installation)
-- [Utilisation](#-utilisation)
-- [Modes d'exécution](#-modes-dexécution)
-- [Régions supportées](#-régions-supportées)
-- [Sécurité et Anonymat](#-sécurité-et-anonymat)
-- [Dépannage](#-dépannage)
-- [Avertissement légal](#-avertissement-légal)
+- [Usage](#-usage)
+- [Pattern Analysis](#-pattern-analysis)
+- [Security Features](#-security-features)
+- [Troubleshooting](#-troubleshooting)
+- [Legal Disclaimer](#-legal-disclaimer)
 
 ---
 
 ## 📝 Description
 
-**WiFi Security Testing Tool** est un framework professionnel de test d'intrusion WiFi développé en PowerShell, conçu pour les auditeurs de sécurité et les administrateurs réseau. L'outil intègre des capacités avancées d'anonymisation (MAC spoofing), de détection d'environnement hostile, et des listes de mots de passe optimisées par région géographique.
+**WiFi Security Testing Tool** is a professional PowerShell-based penetration testing framework designed for security auditors and network administrators. The tool features advanced anonymization (MAC spoofing), hostile environment detection, and intelligent password pattern generation specifically optimized for Orange and Vodacom fiber box default passwords.
 
-### Points forts
-- 🌍 **Spécialisation Afrique** : Listes de mots de passe ciblées pour Orange, Vodacom, MTN, Airtel, et autres opérateurs africains
-- 🔒 **Anonymisation** : Changement automatique d'adresse MAC avant et après les tests
-- 🛡️ **Protection** : Détection de VMs, logiciels de sécurité et environnements d'analyse
-- 🔧 **Cross-platform** : Fonctionne sur Windows (netsh) et Linux (NetworkManager/iw)
-- 📊 **Rapports** : Logging détaillé et statistiques de performance
+### Key Capabilities
+- 🔒 **Anonymization**: Automatic MAC address spoofing before and after testing
+- 🛡️ **Protection**: VM detection, security software detection, and environment analysis
+- 🎯 **Pattern Intelligence**: Advanced pattern generation based on ISP-specific password structures
+- 🔧 **Cross-Platform**: Works on Windows (netsh) and Linux (NetworkManager/iw)
+- 📊 **Reporting**: Detailed logging and performance statistics
 
 ---
 
-## ✨ Fonctionnalités
+## ✨ Features
 
 ### Core Features
-| Fonction | Description
+| Feature | Description |
+|---------|-------------|
+| **18-Character Hex Generation** | Generates random 18-character hexadecimal passwords |
+| **ISP Pattern Mode** | Intelligent patterns based on Orange/Vodacom box analysis |
+| **MAC Spoofing** | Automatic MAC address randomization for anonymity |
+| **Security Detection** | Detects VMs, security software, and analysis tools |
+| **Cross-Platform** | Windows and Linux support |
+| **Resume Capability** | Saves tested passwords to avoid repetition |
+
+### Pattern Analysis Mode
+Based on analysis of real Orange Fiber passwords (e.g., `2TFG3AQ72NZH5CCAGX`), the tool generates:
+- Base36 encoded patterns
+- MAC-address derived passwords
+- Manufacturing date-based sequences
+- Double-character pattern variations
+
+---
+
+## 📋 Prerequisites
+
+### System Requirements
+- **OS**: Windows 10/11 or Linux (Ubuntu/Debian/Kali)
+- **PowerShell**: Version 5.1 or higher
+- **Privileges**: Administrator (Windows) or root (Linux)
+- **Network**: Compatible wireless adapter with monitor mode support
+
+### Windows Prerequisites
+```powershell
+# Check PowerShell version
+$PSVersionTable.PSVersion
+
+# Ensure execution policy allows scripts
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser

